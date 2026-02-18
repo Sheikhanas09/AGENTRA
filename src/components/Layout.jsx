@@ -68,7 +68,7 @@ export default function Layout({ sidebar, navbar, content }) {
             <img
               src={logo}
               alt="AGENTRA Logo"
-              className="w-24 h-24 object-contain"
+              className="w-28 h-28 object-contain"
             />
           </div>
         </div>

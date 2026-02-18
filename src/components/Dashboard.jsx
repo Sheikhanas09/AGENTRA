@@ -5,6 +5,11 @@ import { useState } from "react";
 import Layout from "./Layout";
 import DashboardTab from "./DashboardTab";
 import RecruitmentTab from "./RecruitmentTab";
+import InterviewsTab from "./InterviewsTab";
+import Attendance from "./Attendance";
+import LeaveManagment from "./LeaveManagment";
+import CreateUserTab from "./CreateUserTab";
+import Hiring from "./Hiring";
 import {
   FaTachometerAlt,
   FaBriefcase,
@@ -15,6 +20,8 @@ import {
   FaChartBar,
   FaSignOutAlt,
 } from "react-icons/fa";
+
+import { HiOutlineUserGroup } from "react-icons/hi2";
 
 /* ================= PLACEHOLDER TAB COMPONENTS ================= */
 function DashboardHome() {
@@ -33,21 +40,40 @@ function Recruitment() {
   );
 }
 
-function Interviews() {
-  return <div className="text-white/70">Interviews Module</div>;
-}
+// function Interviews() {
+//   return (
+//     <div className="text-white/70">
+//       <InterviewsTab />
+//     </div>
+//   );
+// }
 
-function Attendance() {
-  return <div className="text-white/70">Attendance Module</div>;
-}
+// function Attendance() {
+//   return (
+//     <div className="text-white/70">
+//       <Attendance />
+//     </div>
+//   );
+// }
 
 function LeaveManagement() {
-  return <div className="text-white/70">Leave Management Module</div>;
+  return (
+    <div className="text-white/70">
+      <LeaveManagment />
+    </div>
+  );
 }
 
 function Payroll() {
   return <div className="text-white/70">Payroll Module</div>;
 }
+// function CreateUser() {
+//   return (
+//     <div className="text-white/70">
+//       <CreateUserTab />
+//     </div>
+//   );
+// }
 
 function Analytics() {
   return <div className="text-white/70">Analytics Module</div>;
@@ -61,8 +87,10 @@ export default function Dashboard() {
     { name: "Dashboard", icon: <FaTachometerAlt size={20} /> },
     { name: "Recruitment", icon: <FaBriefcase size={20} /> },
     { name: "Interviews", icon: <FaCalendarCheck size={20} /> },
+    { name: "Hiring", icon: <FaCalendarCheck size={20} /> },
+    { name: "Create User", icon: <HiOutlineUserGroup size={20} /> },
     { name: "Attendance", icon: <FaUserAlt size={20} /> },
-    { name: "Leave Management", icon: <FaFileAlt size={20} /> },
+    { name: "Leave Managment", icon: <FaFileAlt size={20} /> },
     { name: "Payroll", icon: <FaDollarSign size={20} /> },
     { name: "Analytics", icon: <FaChartBar size={20} /> },
   ];
@@ -70,9 +98,11 @@ export default function Dashboard() {
   const tabComponents = {
     Dashboard: <DashboardHome />,
     Recruitment: <Recruitment />,
-    Interviews: <Interviews />,
+    Interviews: <InterviewsTab />,
+    Hiring: <Hiring />,
+    "Create User": <CreateUserTab />,
     Attendance: <Attendance />,
-    "Leave Management": <LeaveManagement />,
+    "Leave Managment": <LeaveManagment />,
     Payroll: <Payroll />,
     Analytics: <Analytics />,
   };

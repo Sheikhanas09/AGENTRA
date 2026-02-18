@@ -30,3 +30,16 @@
     opacity: 0;
   }
 }
+/* ===== Date Picker Icon ===== */
+input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(42%) sepia(98%) saturate(640%) hue-rotate(95deg)
+    brightness(95%) contrast(90%);
+  cursor: pointer;
+}
+
+/* ===== Time Picker Icon ===== */
+input[type="time"]::-webkit-calendar-picker-indicator {
+  filter: invert(42%) sepia(98%) saturate(640%) hue-rotate(95deg)
+    brightness(95%) contrast(90%);
+  cursor: pointer;
+}
