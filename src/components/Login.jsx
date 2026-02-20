@@ -2,8 +2,11 @@ import { useState } from "react";
 import bgGlow from "../images/bg.png";
 import logo from "../images/logo.png";
 import SplashScreen from "./SplashScreen";
+// import Signup from "./Signup";
+import { useNavigate } from "react-router-dom";
 
 export default function Login() {
+  const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showSplash, setShowSplash] = useState(true);
@@ -101,21 +104,32 @@ export default function Login() {
               Forgot Password?{" "}
             </button>{" "}
           </div>
+          {/* LOGIN BUTTON */}
           <button
             className="
-            w-full sm:w-[120px]
-            h-[44px]
-            mx-auto block
-            border border-[#05DC7F]
-            text-[#05DC7F]
-            rounded-[14px]
-            hover:bg-[#05DC7F]
-            hover:text-black
-            transition
-          "
+    w-full sm:w-[120px]
+    h-[44px]
+    mx-auto block
+    border border-[#05DC7F]
+    text-[#05DC7F]
+    rounded-[14px]
+    hover:bg-[#05DC7F]
+    hover:text-black
+    transition
+  "
           >
             LOGIN
           </button>
+          {/* SIGNUP LINK */}
+          <p className="text-center text-white/70 text-sm mt-6">
+            Don’t have an account?{" "}
+            <span
+              onClick={() => navigate("/signup")}
+              className="text-[#05DC7F] cursor-pointer hover:underline"
+            >
+              Sign Up
+            </span>
+          </p>
         </div>
       </div>
 

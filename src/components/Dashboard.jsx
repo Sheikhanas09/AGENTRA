@@ -22,6 +22,7 @@ import {
 } from "react-icons/fa";
 
 import { HiOutlineUserGroup } from "react-icons/hi2";
+import { MdOutlineTouchApp } from "react-icons/md";
 
 /* ================= PLACEHOLDER TAB COMPONENTS ================= */
 function DashboardHome() {
@@ -87,7 +88,7 @@ export default function Dashboard() {
     { name: "Dashboard", icon: <FaTachometerAlt size={20} /> },
     { name: "Recruitment", icon: <FaBriefcase size={20} /> },
     { name: "Interviews", icon: <FaCalendarCheck size={20} /> },
-    { name: "Hiring", icon: <FaCalendarCheck size={20} /> },
+    { name: "Hiring", icon: <MdOutlineTouchApp size={20} /> },
     { name: "Create User", icon: <HiOutlineUserGroup size={20} /> },
     { name: "Attendance", icon: <FaUserAlt size={20} /> },
     { name: "Leave Managment", icon: <FaFileAlt size={20} /> },
