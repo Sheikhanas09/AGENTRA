@@ -10,6 +10,51 @@ import JobPostsTab from "./JobPostsTab";
 export default function Recruitment() {
   const [activeTab, setActiveTab] = useState("Create Job");
 
+  // ✅ ADD THIS (Single Source of Truth for Job Posts)
+  const [jobPosts] = useState([
+    {
+      id: 1,
+      title: "Frontend Developer",
+      postedAt: "2026-02-01 10:30 AM",
+      description: `Attention all tech-driven founders and aspiring entrepreneurs in Rawalpindi and beyond! 💡
+
+The wait is over. Regional Plan9 is officially opening applications for Cohort 4 at our NASTP Rawalpindi Center! If you have a startup that’s ready to scale, we have the fuel to get you there.
+
+Why struggle alone when you can join a community designed for your success? From professional infrastructure to expert guidance, we provide everything you need to turn your vision into a market-ready reality.
+
+✨ What We Offer:
+🏢 Free Office Space: A premium workspace at NASTP to foster innovation.
+⚖️ Legal Assistance: Expert help to navigate the complexities of business law.
+🧠 Mentorship: One-on-one guidance from seasoned industry leaders.
+📈 Business Model Development: Strategies to refine your value proposition.
+🤝 Networking Opportunities: Connect with investors, peers, and industry giants.
+
+📍 Location: National Aerospace Science & Technology Park (NASTP), Rawalpindi.
+
+ 📢 Don’t Wait: Slots are limited and competition is high!
+
+🔗`,
+    },
+    {
+      id: 2,
+      title: "Backend Developer",
+      postedAt: "2026-01-29 02:15 PM",
+      description: "Backend job description...",
+    },
+    {
+      id: 3,
+      title: "UI/UX Designer",
+      postedAt: "2026-01-25 11:00 AM",
+      description: "UI/UX job description...",
+    },
+    {
+      id: 4,
+      title: "AI Engeenier",
+      postedAt: "2026-01-25 11:00 AM",
+      description: "UI/UX job description...",
+    },
+  ]);
+
   // Shortlisted candidates state
   const [shortlistedCandidates, setShortlistedCandidates] = useState([]);
 
@@ -63,8 +108,12 @@ export default function Recruitment() {
           <AllCandidatesTab onShortlist={handleShortlist} />
         )}
 
+        {/* ✅ ONLY CHANGE HERE */}
         {activeTab === "Job Posts" && (
-          <JobPostsTab setSelectedJob={setSelectedJob} />
+          <JobPostsTab
+            jobPosts={jobPosts} // 👈 added
+            setSelectedJob={setSelectedJob}
+          />
         )}
       </div>
 

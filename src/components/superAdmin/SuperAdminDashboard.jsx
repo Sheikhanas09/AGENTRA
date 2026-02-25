@@ -1,11 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import Layout from "../Layout";
+import Layout from "../layout/Layout";
 import { FaTachometerAlt, FaBriefcase, FaSignOutAlt } from "react-icons/fa";
 import { HiBuildingOffice2 } from "react-icons/hi2";
 import DashboardHome from "./DashboardHome";
-import CompanyRequests from "./CompanyRequests";
+
 import AllCompanies from "./AllCompanies";
 
 export default function SuperAdminDashboard() {
@@ -13,13 +13,13 @@ export default function SuperAdminDashboard() {
 
   const tabs = [
     { name: "Dashboard", icon: <FaTachometerAlt size={20} /> },
-    { name: "Company Requests", icon: <FaBriefcase size={20} /> },
+
     { name: "All Companies", icon: <HiBuildingOffice2 size={20} /> },
   ];
 
   const tabComponents = {
     Dashboard: <DashboardHome />,
-    "Company Requests": <CompanyRequests />,
+
     "All Companies": <AllCompanies />,
   };
 

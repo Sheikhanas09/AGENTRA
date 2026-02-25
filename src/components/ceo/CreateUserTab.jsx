@@ -173,7 +173,7 @@ export default function CreateUser() {
           </div>
 
           {/* ROLE */}
-          <div className="w-full">
+          {/* <div className="w-full">
             <label className="text-gray-400 text-sm">Role</label>
             <select
               name="role"
@@ -185,7 +185,7 @@ export default function CreateUser() {
               <option>Manager</option>
               <option>Admin</option>
             </select>
-          </div>
+          </div> */}
 
           {/* JOINING DATE */}
           <div className="w-full">
@@ -200,7 +200,7 @@ export default function CreateUser() {
           </div>
 
           {/* STATUS */}
-          <div className="w-full">
+          {/* <div className="w-full">
             <label className="text-gray-400 text-sm">Account Status</label>
             <select
               name="status"
@@ -211,7 +211,7 @@ export default function CreateUser() {
               <option>Active</option>
               <option>Inactive</option>
             </select>
-          </div>
+          </div> */}
 
           {/* PASSWORD SECTION */}
           <div className="md:col-span-2 flex flex-col gap-4 border-t border-gray-700 pt-6">

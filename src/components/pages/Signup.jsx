@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import bgGlow from "../images/bg.png";
-import logo from "../images/logo.png";
+import bgGlow from "../../images/bg.png";
+import logo from "../../images/logo.png";
 
 export default function Signup() {
   const navigate = useNavigate();

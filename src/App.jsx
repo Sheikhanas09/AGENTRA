@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
-// import Login from "./components/Login";
-// import Signup from "./components/Signup";
-// import Dashboard from "./components/Dashboard";
+// import Login from "./components/pages/Login";
+// import Signup from "./components/pages/Signup";
+// import Dashboard from "./components/ceo/Dashboard";
 // import Layout from "./components/Layout";
 import SuperAdminDashboard from "./components/superAdmin/SuperAdminDashboard";
 function App() {

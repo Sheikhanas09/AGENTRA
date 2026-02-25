@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import logo from "../images/logo.png";
+import logo from "../../images/logo.png";
 
 export default function Layout({ sidebar, navbar, content }) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);

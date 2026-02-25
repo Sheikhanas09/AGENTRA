@@ -1,6 +1,6 @@
 import { useState } from "react";
-import bgGlow from "../images/bg.png";
-import logo from "../images/logo.png";
+import bgGlow from "../../images/bg.png";
+import logo from "../../images/logo.png";
 import SplashScreen from "./SplashScreen";
 // import Signup from "./Signup";
 import { useNavigate } from "react-router-dom";

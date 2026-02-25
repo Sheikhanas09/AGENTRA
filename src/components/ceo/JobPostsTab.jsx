@@ -2,49 +2,7 @@
 import { useState } from "react";
 import { FaEye } from "react-icons/fa";
 
-export default function JobPostsTab({ setSelectedJob }) {
-  const jobPosts = [
-    {
-      id: 1,
-      title: "Frontend Developer",
-      postedAt: "2026-02-01 10:30 AM",
-      description: `
-Bitzsol Digital is on the lookout for WordPress & Shopify Development Interns who are ready to learn, build, and grow.
-
-If you’re a final-semester student or a fresh grad who actually wants hands-on experience, keep reading:
-
-💻 Open Roles
-✨ WordPress Development Intern
-✨ Shopify Development Intern
-
-What’s In It For You?
-• Real projects.
-• Mentorship.
-• Skill-building + career growth
-• Internship that can turn into a full-time role 💼
-
-📍 Job Details
-• Type: On-site
-• Location: Saidpur Road, Rawalpindi
-
-📩 Drop your CV at:
-hr@bitzsol.com
-      `,
-    },
-    {
-      id: 2,
-      title: "Backend Developer",
-      postedAt: "2026-01-29 02:15 PM",
-      description: `- Build scalable APIs using Node.js and Express...`,
-    },
-    {
-      id: 3,
-      title: "UI/UX Designer",
-      postedAt: "2026-01-25 11:00 AM",
-      description: `- Design modern UI/UX for web and mobile applications...`,
-    },
-  ];
-
+export default function JobPostsTab({ setSelectedJob, jobPosts }) {
   // ===== Pagination state =====
   const itemsPerPage = 2; // You can adjust per page
   const [currentPage, setCurrentPage] = useState(1);
