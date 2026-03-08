@@ -2,87 +2,34 @@
 
 import { useState } from "react";
 import Layout from "../layout/Layout";
+
 import DashboardTab from "./DashboardTab";
-import RecruitmentTab from "./RecruitmentTab";
-import InterviewsTab from "./InterviewsTab";
-import Attendance from "./Attendance";
-import LeaveManagment from "./LeaveManagment";
-import CreateUserTab from "./CreateUserTab";
-import Hiring from "./Hiring";
-import Settings from "./Settings";
+import EmployeeAttendance from "./EmployeeAttendance";
+// import LeaveManagment from "./LeaveManagment";
 
 import {
   FaTachometerAlt,
-  FaBriefcase,
-  FaCalendarCheck,
   FaUserAlt,
   FaFileAlt,
   FaDollarSign,
-  FaChartBar,
   FaSignOutAlt,
 } from "react-icons/fa";
-import { LuSettings2 } from "react-icons/lu";
 
-import { HiOutlineUserGroup } from "react-icons/hi2";
-import { MdOutlineTouchApp } from "react-icons/md";
-
-export default function Dashboard() {
+export default function EmployeeDashboard() {
   const [activeTab, setActiveTab] = useState("Dashboard");
-
-  // ✅ Single source of truth for job posts
-  const [jobPosts] = useState([
-    {
-      id: 1,
-      title: "Frontend Developer",
-      postedAt: "2026-02-01 10:30 AM",
-      description: `Frontend description`,
-    },
-    {
-      id: 2,
-      title: "Backend Developer",
-      postedAt: "2026-01-29 02:15 PM",
-      description: `Backend description`,
-    },
-    {
-      id: 3,
-      title: "UI/UX Designer",
-      postedAt: "2026-01-25 11:00 AM",
-      description: `UI/UX description`,
-    },
-    {
-      id: 4,
-      title: "AI Engineer",
-      postedAt: "2026-01-25 11:00 AM",
-      description: `AI description`,
-    },
-  ]);
 
   const tabs = [
     { name: "Dashboard", icon: <FaTachometerAlt size={20} /> },
-    { name: "Recruitment", icon: <FaBriefcase size={20} /> },
-    { name: "Interviews", icon: <FaCalendarCheck size={20} /> },
-    { name: "Hiring", icon: <MdOutlineTouchApp size={20} /> },
-    { name: "Create Employee", icon: <HiOutlineUserGroup size={20} /> },
     { name: "Attendance", icon: <FaUserAlt size={20} /> },
-    { name: "Leave Managment", icon: <FaFileAlt size={20} /> },
+    { name: "Leave", icon: <FaFileAlt size={20} /> },
     { name: "Payroll", icon: <FaDollarSign size={20} /> },
-    { name: "Settings", icon: <LuSettings2 size={20} /> },
   ];
 
   const tabComponents = {
     Dashboard: <DashboardTab />,
-    Recruitment: <RecruitmentTab jobPosts={jobPosts} />, // ✅ pass jobPosts here
-    Interviews: <InterviewsTab />,
-    Hiring: <Hiring jobPosts={jobPosts} />, // ✅ pass jobPosts here
-    "Create Employee": <CreateUserTab />,
-    Attendance: <Attendance />,
-    "Leave Managment": <LeaveManagment />,
-    Payroll: <div>Payroll Module</div>,
-    Settings: (
-      <div>
-        <Settings />
-      </div>
-    ),
+    Attendance: <EmployeeAttendance />,
+    // Leave: <LeaveManagment />,
+    Payroll: <div className="text-white">Payroll Module</div>,
   };
 
   return (
@@ -120,8 +67,8 @@ export default function Dashboard() {
 
           <div className="flex items-center gap-4 mt-2 md:mt-0">
             <div className="text-right">
-              <p className="text-white font-medium">Sheikh Anas</p>
-              <p className="text-white/55 text-xs">CEO / Administrator</p>
+              <p className="text-white font-medium">Employee Name</p>
+              <p className="text-white/55 text-xs">Employee</p>
             </div>
 
             <div
@@ -133,7 +80,7 @@ export default function Dashboard() {
                 shadow-[0_0_10px_rgba(5,220,127,0.4)]
               "
             >
-              SA
+              EN
             </div>
 
             <button className="text-[#05DC7F]/65 hover:text-white transition">
