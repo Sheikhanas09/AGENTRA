@@ -56,7 +56,7 @@ def login(data: LoginSchema, db: Session = Depends(get_db)):
     if user.status == "fired":
         raise HTTPException(
             status_code=403,
-            detail="Aapka account deactivate ho gaya hai. CEO se rabta karein."
+            detail="Your account has been deactivate"
         )
 
     token = create_access_token({

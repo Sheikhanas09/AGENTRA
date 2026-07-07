@@ -33,7 +33,6 @@ class JDState(TypedDict):
     summary: str
     error: str
 
-
 # ──── Node 1: Generate JD ────
 def generate_jd_node(state: JDState) -> JDState:
 

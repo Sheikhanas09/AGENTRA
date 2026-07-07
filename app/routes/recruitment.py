@@ -270,7 +270,7 @@ async def fetch_and_screen(
 
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
-        raise HTTPException(status_code=404, detail="Job nahi mili")
+        raise HTTPException(status_code=404, detail="Job not found")
 
     try:
         email_applications = fetch_job_application_emails(job_title=job.title)
