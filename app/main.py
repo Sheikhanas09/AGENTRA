@@ -5,8 +5,12 @@ from sqlalchemy.orm import Session
 from app.database import engine, SessionLocal
 from app.models import user
 from app.models import recruitment  # ← naya
-from app.routes import auth, admin, ceo, recruitment as recruitment_routes  # ← naya
+from app.models import attendance 
+from app.routes import auth, admin, ceo, recruitment as recruitment_routes # ← naya
 from app.utils.security import hash_password
+from app.routes import settings as settings_routes
+from app.routes import attendance as attendance_routes
+from app.routes import leave as leave_routes  
 
 app = FastAPI()
 
@@ -22,6 +26,7 @@ app.add_middleware(
 # ──── Tables create ────
 user.Base.metadata.create_all(bind=engine)
 recruitment.Base.metadata.create_all(bind=engine)  # ← naya
+attendance.Base.metadata.create_all(bind=engine)
 
 
 # SUPER ADMIN CREATE FUNCTION
@@ -56,6 +61,9 @@ app.include_router(auth.router)
 app.include_router(admin.router)
 app.include_router(ceo.router)
 app.include_router(recruitment_routes.router)  #  naya
+app.include_router(settings_routes.router)
+app.include_router(attendance_routes.router)
+app.include_router(leave_routes.router)   
 
 
 @app.get("/")
