@@ -18,8 +18,12 @@ from sqlalchemy import text
 from app.database import engine, SessionLocal, Base
 from app.models.user import User          # noqa: F401  (FK target)
 from app.models import attendance as attendance_models
-from app.models.attendance import AttendanceSession, AttendancePhoto, PhotoKindEnum
+from app.models.attendance import (
+    AttendanceSession, AttendancePhoto, PhotoKindEnum,
+    LeaveRequest, LeaveDocument, CompanyLeaveType,
+)
 from app.utils.face_utils import prepare_photo_for_db
+from app.utils.documents import prepare_document
 
 # ──── (table, column, type) ────
 NEW_COLUMNS = [
@@ -38,6 +42,17 @@ NEW_COLUMNS = [
     # ──── Check-in window policy ────
     ("company_work_policy", "enforce_shift_window", "BOOLEAN DEFAULT TRUE"),
     ("company_work_policy", "early_checkin_grace_mins", "INTEGER DEFAULT 60"),
+    ("company_work_policy", "leave_auto_approve_hours", "INTEGER DEFAULT 24"),
+    # ──── Break ka waqt aur muddat ────
+    # Pehle sirf break_policy tha (katega/nahi). Employee ko yeh nahi
+    # pata chalta tha ke break kab hai aur kitni der ki hai.
+    ("company_work_policy", "break_minutes", "INTEGER DEFAULT 60"),
+    ("company_work_policy", "break_start", "VARCHAR"),
+    ("company_work_policy", "break_end", "VARCHAR"),
+
+    # ──── Leave: working days jo balance se katenge ────
+    ("leave_requests", "deductible_days", "INTEGER"),
+    ("leave_requests", "reminder_sent_at", "TIMESTAMP"),
 ]
 
 # ──── Performance indexes ────
@@ -63,6 +78,25 @@ def run():
                 f'CREATE INDEX IF NOT EXISTS {name} ON {table} {cols}'
             ))
             print(f"  [ok] index {name}")
+
+        # ──── leave_type: Postgres enum -> VARCHAR ────
+        # Enum mein sirf 5 fixed values thin. Company apni policy mein koi bhi
+        # type rakh sakti hai (maternity, study, hajj...) — enum us raah mein
+        # rukawat tha. `::text` cast se maujooda data bilkul mehfooz rehta hai.
+        for tbl in ("leave_requests", "leave_balances", "company_policy_overrides"):
+            is_enum = conn.execute(text("""
+                SELECT udt_name FROM information_schema.columns
+                WHERE table_name = :t AND column_name = 'leave_type'
+            """), {"t": tbl}).scalar()
+
+            if is_enum == "leavetypeenum":
+                conn.execute(text(
+                    f"ALTER TABLE {tbl} ALTER COLUMN leave_type "
+                    f"TYPE VARCHAR USING leave_type::text"
+                ))
+                print(f"  [ok] {tbl}.leave_type enum -> VARCHAR")
+            else:
+                print(f"  [ok] {tbl}.leave_type pehle se VARCHAR")
 
         # ──── Intervals ka FK CASCADE karo ────
         # Warna session delete karte waqt "still referenced" error aata hai
@@ -98,14 +132,83 @@ def run():
         else:
             print("\n  [ok] Koi duplicate session nahi")
 
-    # ──── attendance_photos table ────
-    print("\n  Photos table...")
-    Base.metadata.create_all(bind=engine, tables=[AttendancePhoto.__table__])
+    # ──── Binary storage tables ────
+    print("\n  Binary tables...")
+    Base.metadata.create_all(
+        bind=engine,
+        tables=[AttendancePhoto.__table__, LeaveDocument.__table__,
+                CompanyLeaveType.__table__]
+    )
     print("  [ok] attendance_photos ready")
+    print("  [ok] leave_documents ready")
+    print("  [ok] company_leave_types ready")
 
     backfill_photos()
+    backfill_certificates()
 
-    print("\n[DONE] Attendance migration complete!")
+    print("\n[DONE] Attendance + Leave migration complete!")
+
+
+def backfill_certificates():
+    """
+    Purane medical certificates uploads/certificates/ mein padi files hain
+    aur DB mein sirf path. Unhein DB mein import karo.
+    Files delete NAHI karte — safety ke liye pade rehne do.
+    """
+    print("\n  Purane certificates import kar raha hoon...")
+
+    db = SessionLocal()
+    imported = missing = skipped = failed = 0
+
+    try:
+        requests = db.query(LeaveRequest).filter(
+            LeaveRequest.medical_certificate != None
+        ).all()
+
+        for req in requests:
+            if db.query(LeaveDocument).filter(
+                LeaveDocument.leave_request_id == req.id
+            ).first():
+                skipped += 1
+                continue
+
+            path = req.medical_certificate
+            if not path or not os.path.exists(path):
+                missing += 1
+                continue
+
+            try:
+                with open(path, "rb") as f:
+                    raw = f.read()
+                prepared = prepare_document(os.path.basename(path), raw)
+
+                db.add(LeaveDocument(
+                    leave_request_id=req.id,
+                    employee_id=req.employee_id,
+                    company_id=req.company_id,
+                    doc_type="medical_certificate",
+                    file_data=prepared["data"],
+                    file_name=prepared["file_name"],
+                    mime_type=prepared["mime_type"],
+                    file_size_bytes=prepared["size_bytes"],
+                    width=prepared["width"],
+                    height=prepared["height"],
+                    sha256=prepared["sha256"],
+                    uploaded_at=req.created_at,
+                ))
+                imported += 1
+
+            except Exception as e:
+                print(f"      [!] leave {req.id}: {e}")
+                failed += 1
+
+        db.commit()
+        print(f"  [ok] imported={imported} skipped={skipped} "
+              f"file-missing={missing} failed={failed}")
+        print(f"  [ok] DB mein total {db.query(LeaveDocument).count()} certificates")
+
+    finally:
+        db.close()
 
 
 def backfill_photos():

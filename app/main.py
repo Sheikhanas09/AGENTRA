@@ -56,6 +56,32 @@ def create_super_admin():
 create_super_admin()
 
 
+# ──── Background scheduler ────
+# Auto-approve aur reminders ab kisi ke app kholne ka intezar nahi karte
+@app.on_event("startup")
+def start_background_jobs():
+    import os
+    if os.getenv("SCHEDULER_ENABLED", "true").strip().lower() in ("false", "0", "no"):
+        print("[scheduler] SCHEDULER_ENABLED=false — band hai")
+        return
+
+    from app.utils.scheduler import register_jobs
+    register_jobs().start()
+
+
+@app.on_event("shutdown")
+def stop_background_jobs():
+    from app.utils.scheduler import scheduler
+    scheduler.stop()
+
+
+@app.get("/scheduler/status")
+def scheduler_status():
+    """Jobs chal rahe hain ya nahi — debug ke liye"""
+    from app.utils.scheduler import scheduler
+    return {"jobs": scheduler.status()}
+
+
 # ──── Routers ────
 app.include_router(auth.router)
 app.include_router(admin.router)

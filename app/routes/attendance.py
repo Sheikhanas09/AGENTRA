@@ -19,28 +19,59 @@ from app.models.attendance import (
 )
 from app.models.user import User
 from app.utils.face_utils import enroll_face_from_images, prepare_photo_for_db
+from app.utils.pkt import get_pkt_now, get_pkt_today
+from app.utils.workpolicy import (
+    parse_hhmm as _parse_hhmm,
+    fmt_hhmm as _fmt_hhmm,
+    is_working_day as _is_working_day,
+    is_overnight_shift,
+    shift_length_minutes,
+    work_date_for,
+)
+from app.utils.company import (
+    require_ceo,
+    get_user_or_404 as _get_user_or_404,
+    resolve_company_id as _resolve_company_id,
+    assert_can_view as _assert_can_view,
+    company_employees as _company_employees,
+    assert_self as _assert_self_base,
+)
+
 
 router = APIRouter(prefix="/attendance", tags=["Attendance"])
 
 
-# ══════════════════════════════════════════════
-# Time helpers — PKT (UTC+5)
-# ══════════════════════════════════════════════
-PKT = timezone(timedelta(hours=5))
+def _work_policy(db: Session, company_id: Optional[int]):
+    """Company ki work policy — company_id na ho to None"""
+    if not company_id:
+        return None
+    return db.query(CompanyWorkPolicy).filter(
+        CompanyWorkPolicy.company_id == company_id
+    ).first()
 
 
-def get_pkt_now() -> datetime:
-    """Naive datetime in PKT — DB mein isi ko store karte hain"""
-    return datetime.now(PKT).replace(tzinfo=None)
-
-
-def get_pkt_today() -> date:
+def _work_date(db: Session, company_id: Optional[int], now: Optional[datetime] = None):
     """
-    Aaj ki date PKT ke hisaab se.
-    IMPORTANT: date.today() server ka local time use karta hai —
-    agar server UTC pe ho to raat 12–5 baje date galat aati thi.
+    Is company ka abhi ka ATTENDANCE DIN.
+
+    Raat ki shift mein aadhi raat ke baad bhi din wahi rehta hai jis din
+    shift shuru hui thi — warna employee 12 baje ke baad dobara check-in
+    kar leta tha.
     """
-    return get_pkt_now().date()
+    now = now or get_pkt_now()
+    return work_date_for(_work_policy(db, company_id), now)
+
+
+def _employee_work_date(db: Session, employee_id: int):
+    """Employee ki company ke hisaab se abhi ka attendance din"""
+    employee = db.query(User).filter(User.id == employee_id).first()
+    company_id = _resolve_company_id(db, employee) if employee else None
+    return _work_date(db, company_id or employee_id)
+
+
+def _assert_self(current_user: dict, employee_id: int):
+    """Check-in/out/pause/resume sirf apne liye"""
+    _assert_self_base(current_user, employee_id, "attendance mark")
 
 
 # ══════════════════════════════════════════════
@@ -128,90 +159,8 @@ def _verify_location(office, lat, lng, accuracy) -> dict:
 
 
 # ══════════════════════════════════════════════
-# Auth / company helpers
+# Check-in window helpers
 # ══════════════════════════════════════════════
-def require_ceo(current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["ceo", "superadmin"]:
-        raise HTTPException(status_code=403, detail="Sirf CEO yeh kar sakta hai")
-    return current_user
-
-
-def _get_user_or_404(db: Session, user_id: int) -> User:
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User nahi mila")
-    return user
-
-
-def _resolve_company_id(db: Session, user: User) -> Optional[int]:
-    """
-    company_id = CEO ki user id (alag table nahi hai).
-    CEO khud ka id, employee ke liye uski company ka CEO dhoondo.
-    """
-    if user.role == "ceo":
-        return user.id
-    if not user.company_name:
-        return None
-    ceo = db.query(User).filter(
-        User.company_name == user.company_name,
-        User.role == "ceo"
-    ).first()
-    return ceo.id if ceo else None
-
-
-def _assert_self(current_user: dict, employee_id: int):
-    """Check-in/out/pause/resume sirf apne liye — dusre ki attendance nahi lag sakti"""
-    if current_user["user_id"] != employee_id:
-        raise HTTPException(
-            status_code=403,
-            detail="Aap sirf apni attendance mark kar sakte hain"
-        )
-
-
-def _assert_can_view(db: Session, current_user: dict, employee_id: int) -> User:
-    """Apna record ya (CEO ho to) apni company ke employee ka record"""
-    target = _get_user_or_404(db, employee_id)
-
-    if current_user["user_id"] == employee_id:
-        return target
-
-    if current_user["role"] == "superadmin":
-        return target
-
-    if current_user["role"] == "ceo":
-        ceo = _get_user_or_404(db, current_user["user_id"])
-        if target.company_name and target.company_name == ceo.company_name:
-            return target
-
-    raise HTTPException(status_code=403, detail="Yeh record dekhne ki ijazat nahi")
-
-
-def _company_employees(db: Session, ceo: User) -> List[User]:
-    """CEO ki company ke active employees (fired ko chhod ke) + khud CEO nahi"""
-    if not ceo.company_name:
-        return []
-    return db.query(User).filter(
-        User.company_name == ceo.company_name,
-        User.role == "employee",
-        User.status != "fired"
-    ).order_by(User.full_name).all()
-
-
-def _parse_hhmm(value: str) -> Optional[int]:
-    """'09:00' ya '09:00:00' → minutes since midnight"""
-    try:
-        parts = str(value).strip().split(":")
-        return int(parts[0]) * 60 + int(parts[1])
-    except (ValueError, IndexError, AttributeError):
-        return None
-
-
-def _fmt_hhmm(minutes: int) -> str:
-    """540 → '09:00'"""
-    minutes %= 24 * 60
-    return f"{minutes // 60:02d}:{minutes % 60:02d}"
-
-
 def _in_time_window(now_m: int, start_m: int, end_m: int) -> bool:
     """
     now_m window ke andar hai? Aadhi raat ko wrap karne wali window bhi
@@ -293,16 +242,6 @@ def _checkin_window(policy, day: date, now: datetime) -> dict:
         )
 
     return result
-
-
-def _is_working_day(policy, day: date) -> bool:
-    """Policy ke working_days mein yeh din hai ya nahi"""
-    if not policy or not policy.working_days:
-        return True
-    day_name = day.strftime("%A").lower()          # "monday"
-    allowed = {str(d).strip().lower() for d in policy.working_days}
-    allowed |= {d[:3] for d in allowed}            # "mon" bhi chalega
-    return day_name in allowed or day_name[:3] in allowed
 
 
 def _store_photo(
@@ -539,6 +478,133 @@ def _session_out(
     }
 
 
+def _policy_view(policy, window: dict) -> Optional[dict]:
+    """
+    Employee ko dikhane wali policy — poori aur tayyar.
+
+    ═══ YEH ALAG FUNCTION KYUN ═══
+    Employee ko sirf shift ka waqt nahi, poora qanoon maloom hona chahiye:
+    break kab aur kitni der, kitna pehle check-in ho sakta hai, kitni der
+    baad late lagega, overtime kab shuru hoga. Pehle yeh sab sirf CEO ke
+    Settings mein tha — employee ko kabhi bataya hi nahi gaya.
+
+    Hisaab yahan hota hai, UI mein nahi. `late_after` (shift start +
+    tolerance) jaisi cheez UI ko khud nahi jorni chahiye — warna wohi
+    purani ghalti dobara hogi jahan UI apna hisaab lagata tha aur server
+    se alag ho jata tha.
+    """
+    if not policy:
+        return None
+
+    start_m = _parse_hhmm(policy.shift_start)
+    tolerance = policy.late_tolerance_mins or 0
+
+    # ──── Break muqarrar waqt par hai ya jab chahein? ────
+    b_start = _parse_hhmm(policy.break_start) if policy.break_start else None
+    b_end = _parse_hhmm(policy.break_end) if policy.break_end else None
+    fixed_break = b_start is not None and b_end is not None
+
+    if fixed_break:
+        # Waqt diya hai to muddat usi se nikalti hai — do jagah rakhi
+        # hui muddat kabhi na kabhi ek dusre se alag ho jati hai
+        span = (b_end - b_start) if b_end >= b_start else (24 * 60 - b_start + b_end)
+    else:
+        span = policy.break_minutes
+
+    return {
+        # ──── Shift ────
+        "shift_start": policy.shift_start,
+        "shift_end": policy.shift_end,
+        "working_days": policy.working_days,
+        "is_overnight": is_overnight_shift(policy),
+        "shift_length_minutes": shift_length_minutes(policy),
+
+        # ──── Check-in ki hadd ────
+        "enforce_shift_window": policy.enforce_shift_window,
+        "early_checkin_grace_mins": policy.early_checkin_grace_mins,
+        "checkin_opens_at": window.get("opens_at"),
+        "checkin_closes_at": window.get("closes_at"),
+
+        # ──── Late ────
+        "late_tolerance_mins": tolerance,
+        # Is waqt ke BAAD aana late hai — employee ko khud jorna na pare
+        "late_after": _fmt_hhmm(start_m + tolerance) if start_m is not None else None,
+
+        # ──── Break ────
+        "break_policy": getattr(policy.break_policy, "value", policy.break_policy),
+        "break_minutes": span,
+        "break_start": policy.break_start if fixed_break else None,
+        "break_end": policy.break_end if fixed_break else None,
+        "break_is_fixed": fixed_break,
+
+        # ──── Ghante ────
+        "min_daily_hours": policy.min_daily_hours,
+        "overtime_threshold": policy.overtime_threshold,
+        "max_overtime_per_day": policy.max_overtime_per_day,
+    }
+
+
+def _no_session_status(policy, day: date, now: datetime, window: dict,
+                       current_work_date: date) -> tuple:
+    """
+    Jis employee ka session nahi bana — wo ABSENT hai, ya abhi aana baqi hai?
+
+    ═══ MASLA KYA THA ═══
+    Pehle session na hone par seedha "Absent" likh dete the. Yani subah
+    9 baje shift shuru hone se pehle hi poori team absent dikhti thi, aur
+    raat ki shift mein to shift shuru hone se ghante pehle hi.
+
+    ═══ SAHI USOOL ═══
+    Absent wahi hai jo check-in ka MAUQA guzar jane ke baad bhi nahi aaya —
+    yani jab check-in window band ho chuka ho (wahi lamha jab employee ka
+    check-in button disable hota hai). Us se pehle wo sirf "abhi nahi aaya".
+
+    Day shift ho ya night, dono par yehi hisaab lagta hai kyunki window
+    khud shift se banta hai.
+
+    Return: (status, note)
+    """
+    # ──── Guzra hua din — mauqa yaqeenan khatam ────
+    if day < current_work_date:
+        return "Absent", None
+
+    # ──── Aane wala din ────
+    if day > current_work_date:
+        return "Upcoming", "Yeh din abhi aaya nahi"
+
+    # ═══ Aaj ka din ═══
+    if window.get("enforced"):
+        reason = window.get("reason")
+        if reason == "too_early":
+            return "Upcoming", window.get("message")
+        if window.get("open"):
+            return "Not Checked In", "Check-in window abhi khula hai"
+        # shift_ended — mauqa guzar gaya
+        return "Absent", "Check-in window band ho chuka"
+
+    # ──── Window enforce nahi — shift end hi hadd hai ────
+    end_m = _parse_hhmm(policy.shift_end) if policy else None
+    if end_m is None:
+        # Policy hi nahi — kisi ko absent kehna jaldbazi hogi
+        return "Not Checked In", None
+
+    now_m = now.hour * 60 + now.minute
+    start_m = _parse_hhmm(policy.shift_start)
+
+    if start_m is not None and end_m < start_m:
+        # ──── Raat ki shift ────
+        # Is work date ki shift kabhi "guzar" nahi sakti: jaise hi wo
+        # khatam hoti hai, work date khud agle din par chala jata hai.
+        # To ya wo abhi aani hai (do shifton ke darmiyan ka gap), ya chal rahi hai.
+        if end_m < now_m < start_m:
+            return "Upcoming", "Shift raat ko shuru hogi"
+        return "Not Checked In", None
+
+    if now_m > end_m:
+        return "Absent", "Shift khatam ho chuki"
+    return "Not Checked In", None
+
+
 def _absent_row(employee: User, day: date, working_day: bool) -> dict:
     """Jis employee ne check-in hi nahi kiya — same shape, saari values khali"""
     return {
@@ -548,6 +614,7 @@ def _absent_row(employee: User, day: date, working_day: bool) -> dict:
         "department": employee.department,
         "date": str(day),
         "status": "missed",
+        "status_note": None,
 
         "check_in_time": None,
         "check_out_time": None,
@@ -646,9 +713,16 @@ def check_in(
     _assert_self(current_user, data.employee_id)
 
     now = get_pkt_now()
-    today = get_pkt_today()
 
-    # ──── Aaj ka session pehle se hai? (checked-out bhi count hota hai) ────
+    employee = _get_user_or_404(db, data.employee_id)
+    company_id = _resolve_company_id(db, employee) or data.employee_id
+    policy = _work_policy(db, company_id)
+
+    # ──── Attendance ka DIN — calendar date nahi, shift ka din ────
+    # Raat ki shift (22:00-05:00) mein 12 baje ke baad bhi din wahi rehta hai
+    today = work_date_for(policy, now)
+
+    # ──── Is din ka session pehle se hai? (checked-out bhi count hota hai) ────
     existing = db.query(AttendanceSession).filter(
         AttendanceSession.employee_id == data.employee_id,
         AttendanceSession.date == today
@@ -671,13 +745,6 @@ def check_in(
             detail=f"{dangling.date} ka session abhi khula hai — "
                    f"pehle us ka check-out karein"
         )
-
-    employee = _get_user_or_404(db, data.employee_id)
-    company_id = _resolve_company_id(db, employee) or data.employee_id
-
-    policy = db.query(CompanyWorkPolicy).filter(
-        CompanyWorkPolicy.company_id == company_id
-    ).first()
 
     working_day = _is_working_day(policy, today)
 
@@ -770,7 +837,8 @@ def pause_session(
     _assert_self(current_user, data.employee_id)
 
     session = _open_session(
-        db, data.employee_id, get_pkt_today(), AttendanceStatusEnum.checked_in
+        db, data.employee_id, _employee_work_date(db, data.employee_id),
+        AttendanceStatusEnum.checked_in
     )
 
     if not session:
@@ -814,7 +882,8 @@ def resume_session(
     _assert_self(current_user, data.employee_id)
 
     session = _open_session(
-        db, data.employee_id, get_pkt_today(), AttendanceStatusEnum.paused
+        db, data.employee_id, _employee_work_date(db, data.employee_id),
+        AttendanceStatusEnum.paused
     )
 
     if not session:
@@ -860,7 +929,7 @@ def check_out(
 ):
     _assert_self(current_user, data.employee_id)
 
-    today = get_pkt_today()
+    today = _employee_work_date(db, data.employee_id)
 
     # ──── Check-out pe koi time pabandi nahi — raat gaye bhi ho sakta hai ────
     session = _open_session(db, data.employee_id, today)
@@ -1111,13 +1180,13 @@ def get_today_status(
     current_user: dict = Depends(get_current_user)
 ):
     employee = _assert_can_view(db, current_user, employee_id)
-    today = get_pkt_today()
     now = get_pkt_now()
 
     company_id = _resolve_company_id(db, employee)
-    policy = db.query(CompanyWorkPolicy).filter(
-        CompanyWorkPolicy.company_id == company_id
-    ).first() if company_id else None
+    policy = _work_policy(db, company_id)
+
+    # ──── Shift ka din, calendar ka nahi (raat ki shift ke liye) ────
+    today = work_date_for(policy, now)
     window = _checkin_window(policy, today, now)
 
     session = db.query(AttendanceSession).filter(
@@ -1135,6 +1204,9 @@ def get_today_status(
             "status": "on_leave" if leave else "not_checked_in",
             "session_id": None,
             "date": str(today),
+            "work_date": str(today),
+            "is_overnight_shift": is_overnight_shift(policy),
+            "server_date": str(now.date()),
             "server_time": str(now),
             "on_leave": leave is not None,
             "checkin_window": window,
@@ -1156,6 +1228,9 @@ def get_today_status(
 
     photos = _photo_kinds_for(db, [session.id])
     out = _session_out(session, employee, photos.get(session.id, set()))
+    out["work_date"] = str(today)
+    out["is_overnight_shift"] = is_overnight_shift(policy)
+    out["server_date"] = str(now.date())
     out["server_time"] = str(now)
     out["on_leave"] = False
     out["checkin_window"] = window
@@ -1269,8 +1344,13 @@ def get_team_attendance(
     company_id = ceo.id
     now_pkt = get_pkt_now()
 
+    # Aaj ka SHIFT wala din — is se pata chalta hai ke maanga gaya din
+    # guzar chuka hai, chal raha hai, ya abhi aaya hi nahi
+    current_work_date = _work_date(db, company_id, now_pkt)
+
     try:
-        day = date.fromisoformat(report_date) if report_date else get_pkt_today()
+        day = (date.fromisoformat(report_date) if report_date
+               else current_work_date)
     except ValueError:
         raise HTTPException(status_code=400, detail="Date format YYYY-MM-DD hona chahiye")
 
@@ -1297,6 +1377,7 @@ def get_team_attendance(
         CompanyWorkPolicy.company_id == company_id
     ).first()
     working_day = _is_working_day(policy, day)
+    window = _checkin_window(policy, day, now_pkt)
 
     office = db.query(OfficeLocation).filter(
         OfficeLocation.company_id == company_id,
@@ -1317,24 +1398,53 @@ def get_team_attendance(
             )
         else:
             row = _absent_row(emp, day, working_day)
-            row["attendance_status"] = (
-                "On Leave" if leave else ("Off Day" if not working_day else "Absent")
-            )
+            if leave:
+                row["attendance_status"] = "On Leave"
+            elif not working_day:
+                row["attendance_status"] = "Off Day"
+            else:
+                # Absent kehna jaldbazi hogi agar check-in ka mauqa
+                # abhi baqi hai — window band hone par hi Absent
+                status, note = _no_session_status(
+                    policy, day, now_pkt, window, current_work_date
+                )
+                row["attendance_status"] = status
+                row["status_note"] = note
 
         row["on_leave"] = leave is not None
         row["leave_type"] = getattr(leave.leave_type, "value", None) if leave else None
         rows.append(row)
 
-    present = len([r for r in rows if r["attendance_status"] in ("Present", "Late")])
-    late = len([r for r in rows if r["attendance_status"] == "Late"])
-    on_leave = len([r for r in rows if r["attendance_status"] == "On Leave"])
-    absent = len([r for r in rows if r["attendance_status"] == "Absent"])
+    def _count(*statuses):
+        return len([r for r in rows if r["attendance_status"] in statuses])
+
+    present = _count("Present", "Late")
+    late = _count("Late")
+    on_leave = _count("On Leave")
+    absent = _count("Absent")
+    pending = _count("Not Checked In")     # abhi aa sakte hain
+    upcoming = _count("Upcoming")          # shift shuru hi nahi hui
 
     return {
         "date": str(day),
         "server_time": str(now_pkt),
         "is_working_day": working_day,
         "total": len(rows),
+
+        # ──── Shift ka status — UI isi se batata hai ke Absent
+        #      final hai ya abhi count chal raha hai ────
+        "shift_state": {
+            "is_today": day == current_work_date,
+            "is_past": day < current_work_date,
+            "checkin_open": bool(window.get("open")) if window.get("enforced") else None,
+            "window_reason": window.get("reason"),
+            "window_message": window.get("message"),
+            "opens_at": window.get("opens_at"),
+            "closes_at": window.get("closes_at"),
+            "attendance_final": day < current_work_date or (
+                window.get("enforced") and window.get("reason") == "shift_ended"
+            ),
+        },
 
         # ──── Active policy — dashboard pe dikhane ke liye ────
         "policy": {
@@ -1347,7 +1457,9 @@ def get_team_attendance(
             "break_policy": getattr(policy.break_policy, "value", policy.break_policy),
             "enforce_shift_window": policy.enforce_shift_window,
             "early_checkin_grace_mins": policy.early_checkin_grace_mins,
-            "checkin_window_opens": _checkin_window(policy, day, now_pkt)["opens_at"],
+            "checkin_window_opens": window["opens_at"],
+            "is_overnight": is_overnight_shift(policy),
+            "shift_length_minutes": shift_length_minutes(policy),
         } if policy else None,
         "office": {
             "office_name": office.office_name,
@@ -1361,6 +1473,8 @@ def get_team_attendance(
             "present": present,
             "late": late,
             "absent": absent,
+            "pending": pending,
+            "upcoming": upcoming,
             "on_leave": on_leave,
             "checked_out": len([r for r in rows if r["status"] == "checked_out"]),
             "on_break": len([r for r in rows if r["status"] == "paused"]),
@@ -1443,7 +1557,7 @@ def get_attendance_overview(
     """
     ceo = _get_user_or_404(db, current_user["user_id"])
     company_id = ceo.id
-    today = get_pkt_today()
+    today = _work_date(db, company_id)
 
     if range_ == "weekly":
         start = today - timedelta(days=6)
@@ -1477,6 +1591,13 @@ def get_attendance_overview(
     for s in sessions:
         by_day.setdefault(s.date, []).append(s)
 
+    # Aaj ka din abhi chal raha hai — jo abhi tak nahi aaya wo "absent"
+    # nahi, "pending" hai. Absent tabhi jab check-in window band ho jaye.
+    today_window = _checkin_window(policy, today, get_pkt_now())
+    today_final = bool(
+        today_window.get("enforced") and today_window.get("reason") == "shift_ended"
+    )
+
     data = []
     day = start
     while day <= end:
@@ -1485,14 +1606,25 @@ def get_attendance_overview(
             l for l in leaves if l.start_date <= day <= l.end_date
         ])
         present = len(day_sessions)
+        working = _is_working_day(policy, day)
+        missing = max(0, total_employees - present - on_leave)
+
+        if not working:
+            absent = pending = 0        # off day — koi absent nahi
+        elif day == today and not today_final:
+            absent, pending = 0, missing
+        else:
+            absent, pending = missing, 0
+
         data.append({
             "name": day.strftime(label_fmt),
             "date": str(day),
             "present": present,
             "late": len([s for s in day_sessions if s.is_late]),
             "on_leave": on_leave,
-            "absent": max(0, total_employees - present - on_leave),
-            "is_working_day": _is_working_day(policy, day),
+            "absent": absent,
+            "pending": pending,
+            "is_working_day": working,
             "avg_net_hours": round(
                 sum(s.net_hours or 0 for s in day_sessions) / len(day_sessions), 2
             ) if day_sessions else 0,
@@ -1600,12 +1732,11 @@ def get_my_office(
         OfficeLocation.is_active == True
     ).first() if company_id else None
 
-    policy = db.query(CompanyWorkPolicy).filter(
-        CompanyWorkPolicy.company_id == company_id
-    ).first() if company_id else None
+    policy = _work_policy(db, company_id)
 
-    today = get_pkt_today()
     now = get_pkt_now()
+    today = work_date_for(policy, now)
+    window = _checkin_window(policy, today, now)
 
     return {
         "office": {
@@ -1614,17 +1745,13 @@ def get_my_office(
             "longitude": office.longitude,
             "radius_meters": office.radius_meters,
         } if office else None,
-        "policy": {
-            "shift_start": policy.shift_start,
-            "shift_end": policy.shift_end,
-            "late_tolerance_mins": policy.late_tolerance_mins,
-            "min_daily_hours": policy.min_daily_hours,
-            "working_days": policy.working_days,
-            "enforce_shift_window": policy.enforce_shift_window,
-            "early_checkin_grace_mins": policy.early_checkin_grace_mins,
-        } if policy else None,
-        "checkin_window": _checkin_window(policy, today, now),
+        # ──── Poori policy — employee ko bhi maloom honi chahiye ────
+        "policy": _policy_view(policy, window),
+        "checkin_window": window,
         "is_working_day": _is_working_day(policy, today),
-        "server_date": str(today),
+        # ──── Attendance ka din (raat ki shift mein calendar se alag hota hai) ────
+        "work_date": str(today),
+        "is_overnight_shift": is_overnight_shift(policy),
+        "server_date": str(get_pkt_now().date()),
         "server_time": str(now),
     }
