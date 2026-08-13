@@ -1,7 +1,19 @@
-﻿.env
+# ──── Raaz ────
+.env
 app/credentials.json
 app/token.json
+
+# ──── Vector store (dobara ban jata hai) ────
 app/chroma_db/
 chroma_db/
+
+# ──── Python ka kachra ────
 __pycache__/
 *.pyc
+
+# ──── User ka data — kabhi repo mein nahi jana chahiye ────
+# Employees ki face photos aur company ki policy documents.
+# Yeh pehle .gitignore mein NAHI thin — ek `git add .` in ko hamesha
+# ke liye git history mein daal deta.
+app/uploads/
+uploads/

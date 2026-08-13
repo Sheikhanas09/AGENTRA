@@ -246,17 +246,3 @@ def prepare_photo_for_db(
     except Exception as e:
         print(f"Photo prepare error: {e}")
         return None
-
-
-def save_face_image(base64_str: str, save_path: str) -> str:
-    """Base64 image save karo"""
-    try:
-        if "," in base64_str:
-            base64_str = base64_str.split(",")[1]
-        img_bytes = base64.b64decode(base64_str)
-        with open(save_path, "wb") as f:
-            f.write(img_bytes)
-        return save_path
-    except Exception as e:
-        print(f"Image save error: {e}")
-        return None
