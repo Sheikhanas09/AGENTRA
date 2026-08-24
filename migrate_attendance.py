@@ -1,15 +1,15 @@
 """
 Attendance module migration
 ───────────────────────────
-SQLAlchemy ka create_all() sirf NAYI tables banata hai —
-purani table mein naye columns add nahi karta.
-Yeh script:
-  1. Naye columns add karta hai (idempotent — baar baar chala sakte ho)
-  2. Indexes banata hai
-  3. attendance_photos table banata hai
-  4. Purani uploads/faces/ ki photos DB mein import karta hai
+SQLAlchemy's create_all() only creates NEW tables —
+it does not add new columns to an existing one.
+This script:
+  1. Adds new columns (idempotent — safe to run repeatedly)
+  2. Creates indexes
+  3. Creates the attendance_photos table
+  4. Imports old uploads/faces/ photos into the DB
 
-Run:  py migrate_attendance.py     (Backend/ folder se)
+Run:  py migrate_attendance.py     (from the Backend/ folder)
 """
 
 import os
@@ -18,6 +18,10 @@ from sqlalchemy import text
 from app.database import engine, SessionLocal, Base
 from app.models.user import User          # noqa: F401  (FK target)
 from app.models import attendance as attendance_models
+from app.models.payroll import (
+    CompanyBranding, SalaryStructure, PayrollPolicy, PayrollRun, Payslip,
+    PayrollAdjustment, EmployeeLoan, LoanRepayment
+)
 from app.models.attendance import (
     AttendanceSession, AttendancePhoto, PhotoKindEnum,
     LeaveRequest, LeaveDocument, CompanyLeaveType,
@@ -43,14 +47,29 @@ NEW_COLUMNS = [
     ("company_work_policy", "enforce_shift_window", "BOOLEAN DEFAULT TRUE"),
     ("company_work_policy", "early_checkin_grace_mins", "INTEGER DEFAULT 60"),
     ("company_work_policy", "leave_auto_approve_hours", "INTEGER DEFAULT 24"),
-    # ──── Break ka waqt aur muddat ────
-    # Pehle sirf break_policy tha (katega/nahi). Employee ko yeh nahi
-    # pata chalta tha ke break kab hai aur kitni der ki hai.
+    # ──── Break time and duration ────
+    # There used to be only break_policy (deducted or not). Employees
+    # never learned when the break was or how long it lasted.
     ("company_work_policy", "break_minutes", "INTEGER DEFAULT 60"),
     ("company_work_policy", "break_start", "VARCHAR"),
     ("company_work_policy", "break_end", "VARCHAR"),
 
-    # ──── Leave: working days jo balance se katenge ────
+    # ──── Payroll: is this leave paid? ────
+    # This is the one question payroll has to ask. Existing rows default
+    # to TRUE — the "unpaid" ones are then set to FALSE below.
+    ("company_leave_types", "is_paid", "BOOLEAN DEFAULT TRUE NOT NULL"),
+
+    # ──── Payroll: the items that change every month ────
+    # Incentive, arrears and commission differ each month — so they come
+    # from payroll_adjustments, not from the salary structure.
+    ("payslips", "incentive_pay", "NUMERIC(12,2) DEFAULT 0 NOT NULL"),
+    ("payslips", "arrears", "NUMERIC(12,2) DEFAULT 0 NOT NULL"),
+    ("payslips", "commission", "NUMERIC(12,2) DEFAULT 0 NOT NULL"),
+    ("payslips", "other_earnings", "NUMERIC(12,2) DEFAULT 0 NOT NULL"),
+    ("payslips", "loan_deduction", "NUMERIC(12,2) DEFAULT 0 NOT NULL"),
+    ("payslips", "other_deductions", "NUMERIC(12,2) DEFAULT 0 NOT NULL"),
+
+    # ──── Leave: the working days that come off the balance ────
     ("leave_requests", "deductible_days", "INTEGER"),
     ("leave_requests", "reminder_sent_at", "TIMESTAMP"),
 ]
@@ -80,9 +99,9 @@ def run():
             print(f"  [ok] index {name}")
 
         # ──── leave_type: Postgres enum -> VARCHAR ────
-        # Enum mein sirf 5 fixed values thin. Company apni policy mein koi bhi
-        # type rakh sakti hai (maternity, study, hajj...) — enum us raah mein
-        # rukawat tha. `::text` cast se maujooda data bilkul mehfooz rehta hai.
+        # The enum held only 5 fixed values. A company may have any type in
+        # its policy (maternity, study, hajj...) — the enum stood in the way.
+        # The `::text` cast keeps existing data completely intact.
         for tbl in ("leave_requests", "leave_balances", "company_policy_overrides"):
             is_enum = conn.execute(text("""
                 SELECT udt_name FROM information_schema.columns
@@ -96,11 +115,11 @@ def run():
                 ))
                 print(f"  [ok] {tbl}.leave_type enum -> VARCHAR")
             else:
-                print(f"  [ok] {tbl}.leave_type pehle se VARCHAR")
+                print(f"  [ok] {tbl}.leave_type is already VARCHAR")
 
-        # ──── Intervals ka FK CASCADE karo ────
-        # Warna session delete karte waqt "still referenced" error aata hai
-        # (photos table already CASCADE hai — schema consistent rakho)
+        # ──── Make the intervals FK CASCADE ────
+        # Otherwise deleting a session raises a "still referenced" error
+        # (the photos table is already CASCADE — keep the schema consistent)
         conn.execute(text(
             "ALTER TABLE attendance_intervals "
             "DROP CONSTRAINT IF EXISTS attendance_intervals_session_id_fkey"
@@ -114,9 +133,9 @@ def run():
         print("  [ok] attendance_intervals FK -> ON DELETE CASCADE")
 
         # ──── Duplicate sessions cleanup ────
-        # Ek employee ka ek din mein ek hi session hona chahiye.
-        # Purana data mein duplicates ho sakte hain (check-out ke baad
-        # dobara check-in allow tha) → sirf pehla wala rakho.
+        # One employee should have one session per day.
+        # Older data may contain duplicates (checking in again after
+        # checking out used to be allowed) → keep only the first.
         dupes = conn.execute(text("""
             SELECT employee_id, date, COUNT(*) AS c
             FROM attendance_sessions
@@ -125,12 +144,12 @@ def run():
         """)).fetchall()
 
         if dupes:
-            print(f"\n  [!] {len(dupes)} din mein duplicate sessions mile - merge nahi kiya,")
-            print("      sirf report kar raha hoon (data safe rahe):")
+            print(f"\n  [!] duplicate sessions found on {len(dupes)} day(s) - not merged,")
+            print("      only reporting them (so the data stays safe):")
             for d in dupes:
                 print(f"      employee {d[0]} | {d[1]} | {d[2]} sessions")
         else:
-            print("\n  [ok] Koi duplicate session nahi")
+            print("\n  [ok] No duplicate sessions")
 
     # ──── Binary storage tables ────
     print("\n  Binary tables...")
@@ -143,19 +162,56 @@ def run():
     print("  [ok] leave_documents ready")
     print("  [ok] company_leave_types ready")
 
+    # ──── The payroll tables ────
+    print("\n  Payroll tables...")
+    Base.metadata.create_all(
+        bind=engine,
+        tables=[CompanyBranding.__table__, SalaryStructure.__table__,
+                PayrollPolicy.__table__, PayrollRun.__table__,
+                Payslip.__table__]
+    )
+    for t in ("company_branding", "salary_structures", "payroll_policy",
+              "payroll_runs", "payslips", "payroll_adjustments",
+              "employee_loans", "loan_repayments"):
+        print(f"  [ok] {t} ready")
+
+    backfill_unpaid_leave_types()
     backfill_photos()
     backfill_certificates()
 
     print("\n[DONE] Attendance + Leave migration complete!")
 
 
+def backfill_unpaid_leave_types():
+    """
+    Existing rows default to `is_paid` TRUE — but salary SHOULD be
+    deducted for an "unpaid" type. Set those to FALSE.
+
+    Recognised by code alone (`unpaid`, `without_pay`, `lwp`) — types that
+    came from a policy document under a different name are left for the CEO
+    to decide on from the Leave Types tab. Guessing and docking someone's
+    salary would be wrong.
+    """
+    print("\n  Marking unpaid leave types...")
+    with engine.begin() as conn:
+        r = conn.execute(text("""
+            UPDATE company_leave_types
+               SET is_paid = FALSE
+             WHERE is_paid = TRUE
+               AND (lower(code) LIKE '%unpaid%'
+                 OR lower(code) LIKE '%without_pay%'
+                 OR lower(code) = 'lwp')
+        """))
+        print(f"  [ok] {r.rowcount} type(s) marked unpaid")
+
+
 def backfill_certificates():
     """
-    Purane medical certificates uploads/certificates/ mein padi files hain
-    aur DB mein sirf path. Unhein DB mein import karo.
-    Files delete NAHI karte — safety ke liye pade rehne do.
+    Old medical certificates are files in uploads/certificates/ with only a
+    path in the DB. Import them into the DB.
+    The files are NOT deleted — leave them there for safety.
     """
-    print("\n  Purane certificates import kar raha hoon...")
+    print("\n  Importing old certificates...")
 
     db = SessionLocal()
     imported = missing = skipped = failed = 0
@@ -205,7 +261,7 @@ def backfill_certificates():
         db.commit()
         print(f"  [ok] imported={imported} skipped={skipped} "
               f"file-missing={missing} failed={failed}")
-        print(f"  [ok] DB mein total {db.query(LeaveDocument).count()} certificates")
+        print(f"  [ok] {db.query(LeaveDocument).count()} certificates now in the DB")
 
     finally:
         db.close()
@@ -213,11 +269,11 @@ def backfill_certificates():
 
 def backfill_photos():
     """
-    Purani photos uploads/faces/ folder mein padi hain aur DB mein sirf
-    unka path hai. Unhein DB mein import karo taake sab ek jagah ho.
-    Files delete NAHI karte — safety ke liye pade rehne do.
+    Old photos sit in the uploads/faces/ folder with only their path in the
+    DB. Import them so everything lives in one place.
+    The files are NOT deleted — leave them there for safety.
     """
-    print("\n  Purani photos import kar raha hoon...")
+    print("\n  Importing old photos...")
 
     db = SessionLocal()
     imported = missing = skipped = failed = 0
@@ -236,7 +292,7 @@ def backfill_photos():
                 if not path:
                     continue
 
-                # ──── Pehle se import ho chuki? ────
+                # ──── Already imported? ────
                 if db.query(AttendancePhoto).filter(
                     AttendancePhoto.session_id == s.id,
                     AttendancePhoto.kind == kind
@@ -286,7 +342,7 @@ def backfill_photos():
 
         print(f"  [ok] imported={imported} skipped={skipped} "
               f"file-missing={missing} failed={failed}")
-        print(f"  [ok] DB mein total {db.query(AttendancePhoto).count()} photos ({total_kb} KB)")
+        print(f"  [ok] {db.query(AttendancePhoto).count()} photos now in the DB ({total_kb} KB)")
 
     finally:
         db.close()

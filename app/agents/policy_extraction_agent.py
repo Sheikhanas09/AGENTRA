@@ -1,24 +1,24 @@
 """
 Policy Extraction Agent
 ───────────────────────
-CEO ki policy document parh kar leave types TAJWEEZ karta hai.
+Reads the CEO's policy document and SUGGESTS leave types.
 
-AHEM USOOL — yeh agent kuch SAVE nahi karta:
-Wo sirf mashwara deta hai, CEO review karta hai aur khud confirm karta hai.
-Isi liye LLM ki koi ghalti seedha production balance mein nahi jaati.
+IMPORTANT RULE — this agent SAVES nothing:
+It only advises; the CEO reviews and confirms. That is why an LLM mistake
+never lands directly in a production balance.
 
     Policy PDF
         │
-    extract_node   → document ka text (ya ChromaDB ke chunks)
+    extract_node   → the document's text (or the ChromaDB chunks)
         │
-    rag_node       → leave se mutalliq hisse chunte hain
+    rag_node       → picks the parts that relate to leave
         │
     llm_node       → {types: [...], confidence, source_quote}
         │
     CEO review + confirm  →  company_leave_types
 
-Har tajweez ke saath `source_quote` hota hai — document ki wo asal line
-jis se yeh value nikli. CEO khud dekh sakta hai ke agent ne sahi parha ya nahi.
+Every suggestion carries a `source_quote` — the exact line in the document
+the value came from, so the CEO can check whether the agent read it right.
 """
 
 import json
@@ -33,8 +33,8 @@ from typing import TypedDict, List, Optional
 load_dotenv()
 
 
-# ──── Retrieval ke liye query ────
-# Leave policy alfaaz mein aisi hi likhi hoti hai
+# ──── The retrieval query ────
+# This is roughly how a leave policy is worded
 RETRIEVAL_QUERY = """
 leave policy entitlement days per year
 annual casual sick emergency unpaid maternity paternity study leave
@@ -42,13 +42,13 @@ number of days allowed medical certificate required
 advance notice prior approval how many days before applying
 """
 
-# Isse kam similarity wale chunks policy nahi mane jate
+# Chunks below this similarity are not treated as policy
 MIN_SIMILARITY = 0.20
 
-# Itne chunks LLM ko dete hain
+# This many chunks are given to the LLM
 TOP_CHUNKS = 8
 
-# LLM se aayi values ki hadd — bahar ho to CEO ko warn karte hain
+# Limits on the values from the LLM — beyond these the CEO is warned
 MAX_REASONABLE_DAYS = 400
 MAX_REASONABLE_NOTICE = 90
 
@@ -63,29 +63,29 @@ class ExtractionState(TypedDict):
 
 
 # ══════════════════════════════════════════════
-# Node 1: Document ka text
+# Node 1: The document's text
 # ══════════════════════════════════════════════
 def extract_node(state: ExtractionState) -> ExtractionState:
     """
-    Agar caller ne poora text de diya hai to wahi use karo.
-    Warna ChromaDB ke chunks pe guzara karenge (agla node).
+    If the caller supplied the full text, use it.
+    Otherwise we make do with the ChromaDB chunks (the next node).
     """
     text = (state.get("policy_text") or "").strip()
     return {**state, "policy_text": text}
 
 
 # ══════════════════════════════════════════════
-# Node 2: RAG — leave se mutalliq hisse
+# Node 2: RAG — the parts that relate to leave
 # ══════════════════════════════════════════════
 def rag_node(state: ExtractionState) -> ExtractionState:
     """
-    ChromaDB se leave se mutalliq chunks nikalo.
+    Pull the leave-related chunks out of ChromaDB.
 
-    Poora document LLM ko dena mehnga bhi hai aur natija bhi kharab —
-    parking rules aur dress code beech mein aa kar dhyan bata dete hain.
+    Handing the whole document to the LLM is both expensive and worse —
+    parking rules and dress codes get in the way and distract it.
     """
     try:
-        # Lazy import — GROQ key na ho to bhi module load ho jaye
+        # Lazy import — the module should load even without a GROQ key
         from app.agents.leave_agent import get_chroma_client, get_embedding_model
 
         collection = get_chroma_client().get_or_create_collection(
@@ -115,7 +115,7 @@ def rag_node(state: ExtractionState) -> ExtractionState:
 
 
 # ══════════════════════════════════════════════
-# Node 3: LLM — types nikalo
+# Node 3: LLM — extract the types
 # ══════════════════════════════════════════════
 PROMPT = """You are an HR policy analyst. Read the company policy below and
 extract every LEAVE TYPE it defines.
@@ -135,6 +135,10 @@ For each leave type you find, report:
   certificate or documentary proof
 - advance_notice_days: how many days in advance it must be applied for.
   0 if it can be taken the same day (typically sick/emergency).
+- is_paid: true if the employee keeps their salary during this leave, false if
+  the policy calls it unpaid / without pay / leave without pay / LWP.
+  OMIT this field entirely if the policy does not say either way — do NOT
+  guess. Payroll deducts salary from this field, so a guess costs real money.
 - source_quote: the EXACT sentence from the policy this came from. Do not
   paraphrase. This is how a human verifies you.
 - confidence: "high" if the policy states it plainly, "low" if you inferred it
@@ -156,6 +160,7 @@ Respond ONLY with JSON:
       "is_unlimited": false,
       "requires_certificate": false,
       "advance_notice_days": 7,
+      "is_paid": true,
       "source_quote": "Employees are entitled to 15 days of annual leave...",
       "confidence": "high"
     }}
@@ -164,7 +169,7 @@ Respond ONLY with JSON:
 
 
 def llm_node(state: ExtractionState) -> ExtractionState:
-    """Chunks LLM ko do, JSON wapas lo, phir usay bharose ke qabil banao"""
+    """Give the chunks to the LLM, take the JSON back, then make it trustworthy"""
     policy = state.get("policy_text") or ""
 
     if not policy and state.get("retrieved_chunks"):
@@ -177,10 +182,10 @@ def llm_node(state: ExtractionState) -> ExtractionState:
         return {
             **state,
             "types": [],
-            "warnings": ["Policy document mein leave se mutalliq kuch nahi mila"],
+            "warnings": ["Nothing about leave was found in the policy document"],
         }
 
-    # Bohot lamba text LLM ko confuse karta hai aur mehnga bhi hai
+    # Very long text confuses the LLM and costs more
     policy = policy[:12000]
 
     try:
@@ -210,24 +215,60 @@ def llm_node(state: ExtractionState) -> ExtractionState:
         return {
             **state,
             "types": [],
-            "warnings": ["Agent policy parh nahi paya — types manually banayein"],
+            "warnings": ["The agent could not read the policy — create the types manually"],
             "error": str(e),
         }
 
 
+def _paid_value(raw, code: str, label: str):
+    """
+    Is this type paid? → True / False / **None**
+
+    ═══ WHY None MATTERS ═══
+    "Unknown" and "paid" are two completely different things. Treating
+    silence as `True` would let every policy upload quietly turn the CEO's
+    "unpaid" into "paid" — and the deduction for that type would be
+    switched off forever.
+
+    So there are three states, and `apply_policy_types()` decides:
+      True/False → the agent read it plainly from the document
+      None       → the document is silent — leave an existing type alone,
+                   decide a new type from its NAME
+
+    An LLM often sends words like "yes"/"unpaid" instead of a boolean, so
+    strings are accepted too.
+    """
+    if isinstance(raw, bool):
+        return raw
+
+    if isinstance(raw, str):
+        s = raw.strip().lower()
+        if s in ("true", "yes", "paid", "y"):
+            return True
+        if s in ("false", "no", "unpaid", "n"):
+            return False
+
+    # ──── The agent is silent — does the name itself say so? ────
+    # It comes from one place, so the migration, the routes and the agent
+    # can never decide differently
+    from app.routes.leave import looks_unpaid
+
+    return False if looks_unpaid(code, label) else None
+
+
 def _sanitize(raw_types) -> tuple:
     """
-    LLM ke jawab ko qabil-e-etemad banao.
+    Make the LLM's answer trustworthy.
 
-    LLM kuch bhi bhej sakta hai — "fifteen days", manfi adad, code mein
-    space. Yahan sab saaf hota hai, aur jo ajeeb lage us par CEO ko
-    warning milti hai (chup chaap theek nahi karte).
+    An LLM can send anything — "fifteen days", a negative number, a space
+    inside a code. Everything is cleaned here, and anything odd raises a
+    warning for the CEO (we never fix things silently).
     """
     types, warnings = [], []
     seen = set()
 
     if not isinstance(raw_types, list):
-        return [], ["Agent ka jawab samajh nahi aaya"]
+        return [], ["The agent's answer could not be understood"]
 
     for item in raw_types:
         if not isinstance(item, dict):
@@ -246,13 +287,13 @@ def _sanitize(raw_types) -> tuple:
         try:
             days = int(days) if days is not None else 0
         except (TypeError, ValueError):
-            warnings.append(f"{label}: din ka adad samajh nahi aaya, 0 rakha hai")
+            warnings.append(f"{label}: the number of days was unreadable, set to 0")
             days = 0
 
         if days < 0:
             days = 0
         if days > MAX_REASONABLE_DAYS:
-            warnings.append(f"{label}: {days} din ajeeb lagta hai — zaroor check karein")
+            warnings.append(f"{label}: {days} days looks odd — please check it")
 
         # ──── Notice ────
         notice = item.get("advance_notice_days")
@@ -267,10 +308,18 @@ def _sanitize(raw_types) -> tuple:
         if confidence not in ("high", "low"):
             confidence = "low"
 
-        # ──── Bina hawale ke tajweez par bharosa kam ────
+        # ──── A suggestion without a quote is trusted less ────
         if not quote:
             confidence = "low"
-            warnings.append(f"{label}: document se koi line quote nahi hui")
+            warnings.append(f"{label}: no line was quoted from the document")
+
+        # ──── Paid or unpaid — this affects MONEY directly ────
+        paid = _paid_value(item.get("is_paid"), code, label)
+        if paid is False:
+            warnings.append(
+                f"{label}: this is unpaid — payroll will deduct for each "
+                f"day. Please confirm this"
+            )
 
         types.append({
             "code": code,
@@ -279,6 +328,8 @@ def _sanitize(raw_types) -> tuple:
             "is_unlimited": bool(item.get("is_unlimited")),
             "requires_certificate": bool(item.get("requires_certificate")),
             "advance_notice_days": notice,
+            # True / False / None — None means "the document is silent"
+            "is_paid": paid,
             "source_quote": quote[:500],
             "confidence": confidence,
         })
@@ -307,7 +358,7 @@ extraction_graph = build_extraction_graph()
 
 def extract_leave_types(company_id: int, policy_text: str = "") -> dict:
     """
-    Policy se leave types nikalo — SIRF tajweez, kuch save nahi hota.
+    Extract leave types from the policy — SUGGESTIONS only, nothing is saved.
 
     Return: {types, warnings, chunks_used, error}
     """

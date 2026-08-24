@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Date, DateTime  # ← DateTime add karo
+from sqlalchemy import Column, Integer, String, Date, DateTime
 from app.database import Base
 
 
@@ -25,6 +25,6 @@ class User(Base):
 
     status = Column(String)  # pending / approved / active / inactive
 
-    # ──── Yeh naye add karo ────
-    approved_at = Column(DateTime, nullable=True)   # approve hone ka time
-    expires_at = Column(DateTime, nullable=True)    # 30 days baad expire
+    # ──── Approval tracking ────
+    approved_at = Column(DateTime, nullable=True)   # when approval happened
+    expires_at = Column(DateTime, nullable=True)    # expires after 30 days

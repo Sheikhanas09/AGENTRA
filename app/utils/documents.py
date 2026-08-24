@@ -1,16 +1,16 @@
 """
-Document prep — DB mein store karne se pehle
+Document prep — before storing in the DB
 ────────────────────────────────────────────
-Medical certificates PDF bhi ho sakte hain aur mobile se kheenchi photo bhi.
-Photo 4-8 MB ki aa jati hai — usay jaisa ka taisa DB mein daalna DB ko phula
-deta hai. Image ho to compress karte hain, PDF ko haath nahi lagate.
+A medical certificate can be a PDF or a photo taken on a phone. Photos
+arrive at 4-8 MB — storing them untouched bloats the DB. Images are
+compressed; PDFs are left alone.
 """
 
 import hashlib
 import io
 import os
 
-# Kis kism ki files qabool hain
+# Which kinds of file are accepted
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".webp"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
@@ -24,35 +24,35 @@ MIME_TYPES = {
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024      # 10 MB
 
-# Certificate parhne layak rehna chahiye, isliye attendance photo se bara
+# A certificate must stay readable, so this is larger than an attendance photo
 DOC_MAX_DIM = 1600
 DOC_JPEG_QUALITY = 80
 
 
 class DocumentError(Exception):
-    """Upload qabool na ho — message seedha user ko dikhta hai"""
+    """The upload was rejected — this message is shown to the user directly"""
 
 
 def prepare_document(filename: str, raw: bytes) -> dict:
     """
-    Uploaded file ko DB mein store karne layak banao.
+    Make an uploaded file fit to store in the DB.
 
     Return: {data, mime_type, file_name, size_bytes, sha256, width, height}
-    Ghalat file pe DocumentError uthata hai.
+    Raises DocumentError on an invalid file.
     """
     if not raw:
-        raise DocumentError("File khali hai")
+        raise DocumentError("The file is empty")
 
     if len(raw) > MAX_UPLOAD_BYTES:
         raise DocumentError(
-            f"File bohot bari hai ({len(raw) // (1024 * 1024)} MB) — "
-            f"{MAX_UPLOAD_BYTES // (1024 * 1024)} MB tak allowed hai"
+            f"The file is too large ({len(raw) // (1024 * 1024)} MB) — "
+            f"up to {MAX_UPLOAD_BYTES // (1024 * 1024)} MB is allowed"
         )
 
     ext = os.path.splitext(filename or "")[1].lower()
     if ext not in ALLOWED_EXTENSIONS:
         raise DocumentError(
-            f"Sirf {', '.join(sorted(ALLOWED_EXTENSIONS))} files allowed hain"
+            f"Only {', '.join(sorted(ALLOWED_EXTENSIONS))} files are allowed"
         )
 
     data = raw
@@ -79,11 +79,11 @@ def prepare_document(filename: str, raw: bytes) -> dict:
         except DocumentError:
             raise
         except Exception as e:
-            raise DocumentError(f"Image parh nahi paye: {e}")
+            raise DocumentError(f"The image could not be read: {e}")
 
     elif not raw.startswith(b"%PDF"):
-        # ──── Naam .pdf hai magar andar PDF nahi ────
-        raise DocumentError("Yeh valid PDF file nahi hai")
+        # ──── Named .pdf but not actually a PDF inside ────
+        raise DocumentError("This is not a valid PDF file")
 
     return {
         "data": data,

@@ -14,7 +14,7 @@ router = APIRouter(prefix="/recruitment", tags=["Recruitment"])
 
 def require_ceo(current_user: dict = Depends(get_current_user)):
     if current_user["role"] != "ceo":
-        raise HTTPException(status_code=403, detail="Sirf CEO yeh kaam kar sakta hai")
+        raise HTTPException(status_code=403, detail="Only the CEO can do this")
     return current_user
 
 def to_string(value) -> str:
@@ -105,7 +105,7 @@ def create_job(data: JobCreate, db: Session = Depends(get_db), current_user: dic
     from app.models.user import User
     ceo = db.query(User).filter(User.id == current_user["user_id"]).first()
     if not ceo:
-        raise HTTPException(status_code=404, detail="CEO nahi mila")
+        raise HTTPException(status_code=404, detail="CEO not found")
 
     jd_result = generate_job_description(
         title=data.title, department=data.department,
@@ -157,7 +157,7 @@ def get_jobs(db: Session = Depends(get_db), current_user: dict = Depends(require
 def get_job(job_id: int, db: Session = Depends(get_db)):
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
-        raise HTTPException(status_code=404, detail="Job nahi mili")
+        raise HTTPException(status_code=404, detail="Job not found")
     return {"id": job.id, "title": job.title, "department": job.department,
             "employment_type": job.employment_type, "experience": job.experience,
             "skills": job.skills, "salary_range": job.salary_range,
@@ -172,9 +172,9 @@ def delete_job(job_id: int, db: Session = Depends(get_db), current_user: dict = 
 
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
-        raise HTTPException(status_code=404, detail="Job nahi mili")
+        raise HTTPException(status_code=404, detail="Job not found")
 
-    # ──── Order mein delete karo ────
+    # ──── Delete in order ────
     interviews = db.query(Interview).filter(Interview.job_id == job_id).all()
     interview_ids = [i.id for i in interviews]
 
@@ -202,7 +202,7 @@ def delete_job(job_id: int, db: Session = Depends(get_db), current_user: dict = 
     db.delete(job)
     db.commit()
 
-    return {"message": "Job aur sab related data delete ho gaya!"}
+    return {"message": "The job and all related data have been deleted"}
 
 # ──── Public Jobs ────
 @router.get("/public/jobs")
@@ -228,7 +228,7 @@ def get_public_job(job_id: int, db: Session = Depends(get_db)):
     from app.models.user import User
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
-        raise HTTPException(status_code=404, detail="Job nahi mili")
+        raise HTTPException(status_code=404, detail="Job not found")
     ceo = db.query(User).filter(User.id == job.ceo_id).first()
     return {"id": job.id, "title": job.title, "department": job.department,
             "employment_type": job.employment_type, "experience": job.experience,
@@ -297,7 +297,7 @@ async def fetch_and_screen(
                     continue
                 elif existing_app.status in ["screened", "shortlisted",
                                               "interview_scheduled", "applied"]:
-                    # ──── CV update karo + pdf bhi ────
+                    # ──── Update the CV and the PDF ────
                     existing_candidate.cv_text = app_data['cv_text']
                     existing_candidate.cv_filename = app_data['cv_filename']
                     existing_candidate.cv_pdf = app_data.get('cv_pdf')  # ← add
@@ -337,7 +337,7 @@ async def fetch_and_screen(
 
             candidate = existing_candidate
         else:
-            # ──── Naya candidate ────
+            # ──── A new candidate ────
             candidate = Candidate(
                 full_name=app_data['name'],
                 email=app_data['email'],
@@ -349,7 +349,7 @@ async def fetch_and_screen(
             db.add(candidate)
             db.flush()
 
-        # ──── Naya application banao ────
+        # ──── Create a new application ────
         application = Application(
             candidate_id=candidate.id, job_id=job_id, status="applied"
         )
@@ -428,7 +428,7 @@ def get_employees_for_interview(
     }
 
 
-# ──── Interview Schedule karo (MCP se) ────
+# ──── Schedule an interview (via MCP) ────
 @router.post("/schedule-interview")
 async def schedule_interview(
     application_id: int = Form(...),
@@ -463,7 +463,7 @@ async def schedule_interview(
     date_obj = datetime.strptime(scheduled_date, "%Y-%m-%d")
     formatted_date = date_obj.strftime("%B %d, %Y")
 
-    # ──── MCP se Meet Link + Email ────
+    # ──── Meet link + email via MCP ────
     meet_link, email_sent = await call_mcp_tools(
         candidate_name=candidate.full_name,
         candidate_email=candidate.email,
@@ -478,7 +478,7 @@ async def schedule_interview(
         sender_password=os.getenv("GMAIL_APP_PASSWORD")
     )
 
-    # ──── Interview save karo ────
+    # ──── Save the interview ────
     interview = Interview(
         application_id=application_id,
         candidate_id=candidate_id,
@@ -538,12 +538,12 @@ def get_interviews(
         ).first()
         job = db.query(Job).filter(Job.id == interview.job_id).first()
 
-        # ──── Feedback check karo ────
+        # ──── Check the feedback ────
         feedback = db.query(InterviewFeedback).filter(
             InterviewFeedback.interview_id == interview.id
         ).first()
 
-        # ──── Status determine karo ────
+        # ──── Determine the status ────
         if interview.status == "completed":
             status = "completed"
         elif interview.scheduled_date < today:
@@ -574,7 +574,7 @@ def get_interviews(
 
     return {"total": len(result), "interviews": result}
 
-# ──── Interview Complete mark karo ────
+# ──── Mark an interview complete ────
 @router.put("/interviews/{interview_id}/complete")
 def mark_interview_complete(
     interview_id: int,
@@ -584,13 +584,13 @@ def mark_interview_complete(
     from app.models.recruitment import Interview
     interview = db.query(Interview).filter(Interview.id == interview_id).first()
     if not interview:
-        raise HTTPException(status_code=404, detail="Interview nahi mili")
+        raise HTTPException(status_code=404, detail="Interview not found")
     interview.status = "completed"
     db.commit()
     return {"message": "Interview has been marked as completed!"}
 
 
-# ──── Interview Feedback submit karo ────
+# ──── Submit interview feedback ────
 @router.post("/interviews/{interview_id}/feedback")
 def submit_feedback(
     interview_id: int,
@@ -622,7 +622,7 @@ def submit_feedback(
     db.commit()
     db.refresh(feedback)
 
-    # ──── Agent 3: Evaluation trigger karo ────
+    # ──── Agent 3: trigger the evaluation ────
     from app.agents.evaluation_agent import evaluate_candidate
 
     application = db.query(Application).filter(
@@ -658,7 +658,7 @@ def submit_feedback(
         "final_score": eval_result["final_score"] if eval_result else None,
         "ranking_category": eval_result["ranking_category"] if eval_result else None
     }
-    # ──── Employee ke apne interviews ────
+    # ──── The employee's own interviews ────
 @router.get("/my-interviews")
 def get_my_interviews(
     db: Session = Depends(get_db),
@@ -670,7 +670,7 @@ def get_my_interviews(
 
     user = db.query(User).filter(User.id == current_user["user_id"]).first()
     if not user:
-        raise HTTPException(status_code=404, detail="User nahi mila")
+        raise HTTPException(status_code=404, detail="User not found")
 
     interviews = db.query(Interview).filter(
         (Interview.interviewer_1 == user.email) |
@@ -719,7 +719,7 @@ def get_my_interviews(
         })
 
     return {"total": len(result), "interviews": result}
-    # ──── Ranked Candidates fetch karo ────
+    # ──── Fetch the ranked candidates ────
 @router.get("/ranked-candidates/{job_id}")
 def get_ranked_candidates(
     job_id: int,
@@ -781,8 +781,7 @@ def get_ranked_candidates(
         "best_candidate": result["best_candidate"]
     }
 
-# ──── CEO Candidate Approve karo ────
-# ──── CEO Candidate Approve karo ────
+# ──── CEO approves a candidate ────
 @router.post("/hire/{application_id}")
 async def hire_candidate(
     application_id: int,
@@ -822,7 +821,7 @@ async def hire_candidate(
     accept_link = f"{ngrok_url}/recruitment/accept-offer/{application_id}?ngrok-skip-browser-warning=true"
     today = datetime.now().strftime("%B %d, %Y")
 
-    # ──── MCP se Offer Letter Email ────
+    # ──── Offer letter email via MCP ────
     email_sent = False
     try:
         server_params = StdioServerParameters(
@@ -861,7 +860,7 @@ async def hire_candidate(
         "email_sent": email_sent
     }
 
-# ──── Offer Accept karo ────
+# ──── Accept the offer ────
 @router.get("/accept-offer/{application_id}")
 async def accept_offer(
     application_id: int,
@@ -877,7 +876,7 @@ async def accept_offer(
         Application.id == application_id
     ).first()
     if not application:
-        raise HTTPException(status_code=404, detail="Application nahi mili")
+        raise HTTPException(status_code=404, detail="Application not found")
 
     if application.status != "hired":
         html = """<!DOCTYPE html><html><head><title>Already Processed</title>
@@ -901,7 +900,7 @@ async def accept_offer(
 
     joining_date = (datetime.now() + timedelta(weeks=2)).strftime("%B %d, %Y")
 
-    # ──── MCP se Onboarding Email ────
+    # ──── Onboarding email via MCP ────
     try:
         server_params = StdioServerParameters(
             command=sys.executable,
@@ -1087,7 +1086,7 @@ def get_hired_employees(
 
     return {"total": len(result), "employees": result}
 
-# ──── Employee Fire/Remove karo ────
+# ──── Fire / remove an employee ────
 @router.put("/fire-employee/{employee_id}")
 def fire_employee(
     employee_id: str,
@@ -1096,29 +1095,29 @@ def fire_employee(
 ):
     from app.models.user import User
 
-    # ──── Hired candidate fire karo ────
+    # ──── Fire a hired candidate ────
     if employee_id.startswith("candidate_"):
         app_id = int(employee_id.replace("candidate_", ""))
         application = db.query(Application).filter(
             Application.id == app_id
         ).first()
         if not application:
-            raise HTTPException(status_code=404, detail="Application nahi mili")
+            raise HTTPException(status_code=404, detail="Application not found")
         if application.status not in ["hired", "accepted"]:
-            raise HTTPException(status_code=400, detail="Yeh employee hired nahi hai")
+            raise HTTPException(status_code=400, detail="This employee was not hired")
         application.status = "fired"
         db.commit()
-        return {"message": "Hired employee remove ho gaya!"}
+        return {"message": "Hired employee removed"}
 
-    # ──── Manually created employee fire karo ────
+    # ──── Fire a manually created employee ────
     elif employee_id.startswith("user_"):
         user_id = int(employee_id.replace("user_", ""))
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
-            raise HTTPException(status_code=404, detail="User nahi mila")
+            raise HTTPException(status_code=404, detail="User not found")
         user.status = "fired"
         db.commit()
-        return {"message": "Created employee remove ho gaya!"}
+        return {"message": "Created employee removed"}
 
     else:
         raise HTTPException(status_code=400, detail="Invalid employee ID")
@@ -1184,15 +1183,15 @@ def download_cv(
         Application.id == application_id
     ).first()
     if not application:
-        raise HTTPException(status_code=404, detail="Application nahi mili")
+        raise HTTPException(status_code=404, detail="Application not found")
 
     candidate = db.query(Candidate).filter(
         Candidate.id == application.candidate_id
     ).first()
     if not candidate:
-        raise HTTPException(status_code=404, detail="Candidate nahi mila")
+        raise HTTPException(status_code=404, detail="Candidate not found")
 
-    # ──── Original PDF hai to wahi bhejo ────
+    # ──── Send the original PDF if there is one ────
     if candidate.cv_pdf:
         filename = f"{candidate.full_name or 'CV'}_CV.pdf".replace(" ", "_")
         return Response(
@@ -1204,7 +1203,7 @@ def download_cv(
             }
         )
     
-    # ──── Fallback: text se PDF banao ────
+    # ──── Fallback: build a PDF from the text ────
     from reportlab.lib.pagesizes import letter
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
     from reportlab.lib.styles import getSampleStyleSheet
@@ -1240,7 +1239,7 @@ def download_cv(
             "Access-Control-Expose-Headers": "Content-Disposition"
         }
     )
-    # ──── Candidate Reject karo ────
+    # ──── Reject the candidate ────
 @router.post("/reject/{application_id}")
 async def reject_candidate(
     application_id: int,
@@ -1256,10 +1255,10 @@ async def reject_candidate(
         Application.id == application_id
     ).first()
     if not application:
-        raise HTTPException(status_code=404, detail="Application nahi mili")
+        raise HTTPException(status_code=404, detail="Application not found")
 
     if application.status in ["hired", "accepted"]:
-        raise HTTPException(status_code=400, detail="Already hired candidate reject nahi ho sakta")
+        raise HTTPException(status_code=400, detail="A candidate who is already hired cannot be rejected")
 
     candidate = db.query(Candidate).filter(
         Candidate.id == application.candidate_id
@@ -1271,7 +1270,7 @@ async def reject_candidate(
     application.status = "rejected"
     db.commit()
 
-    # ──── MCP se Rejection Email ────
+    # ──── Rejection email via MCP ────
     email_sent = False
     try:
         server_params = StdioServerParameters(
@@ -1298,7 +1297,7 @@ async def reject_candidate(
         print(f"MCP rejection error: {e}")
 
     return {
-        "message": "Candidate rejected! Email bheja gaya!",
+        "message": "Candidate rejected — email sent",
         "application_id": application_id,
         "email_sent": email_sent
     }

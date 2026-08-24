@@ -11,7 +11,7 @@ class JobCreate(BaseModel):
     experience: str
     skills: str
     salary_range: str
-    additional_info: str = ""  # ← add hua
+    additional_info: str = ""
 
 
 class JobResponse(BaseModel):

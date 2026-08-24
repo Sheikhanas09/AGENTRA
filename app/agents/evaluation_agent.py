@@ -22,7 +22,7 @@ def calculate_score_node(state: EvaluationState) -> EvaluationState:
     technical_score = state["technical_score"]    # 0-10
     communication_score = state["communication_score"]  # 0-10
 
-    # ──── 0-10 ko 0-100 mein convert karo ────
+    # ──── Convert 0-10 to 0-100 ────
     technical_100 = technical_score * 10
     communication_100 = communication_score * 10
 

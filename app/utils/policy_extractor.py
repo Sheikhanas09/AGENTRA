@@ -4,7 +4,7 @@ from docx import Document
 
 
 def extract_text_from_pdf(file_path: str) -> str:
-    """PDF se text nikalo"""
+    """Extract text from a PDF"""
     text = ""
     try:
         with pdfplumber.open(file_path) as pdf:
@@ -18,14 +18,14 @@ def extract_text_from_pdf(file_path: str) -> str:
 
 
 def extract_text_from_docx(file_path: str) -> str:
-    """DOCX se text nikalo"""
+    """Extract text from a DOCX"""
     text = ""
     try:
         doc = Document(file_path)
         for para in doc.paragraphs:
             if para.text.strip():
                 text += para.text + "\n"
-        # ──── Tables bhi nikalo ────
+        # ──── Pull the tables out too ────
         for table in doc.tables:
             for row in table.rows:
                 for cell in row.cells:
@@ -39,7 +39,7 @@ def extract_text_from_docx(file_path: str) -> str:
 
 def extract_policy_text(file_path: str, file_type: str) -> str:
     """
-    File type ke hisaab se text nikalo
+    Extract text according to the file type
     file_type = 'pdf' ya 'docx'
     """
     if file_type == "pdf":
@@ -49,7 +49,7 @@ def extract_policy_text(file_path: str, file_type: str) -> str:
     else:
         return ""
 
-    # ──── Agar text empty hai ────
+    # ──── If the text came back empty ────
     if not text:
         print(f"Warning: No text extracted from {file_path}")
         return ""

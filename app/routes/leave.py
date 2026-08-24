@@ -33,38 +33,66 @@ router = APIRouter(prefix="/leave", tags=["Leave"])
 # ══════════════════════════════════════════════
 # Default leave types
 # ══════════════════════════════════════════════
-# Yeh sirf SHURUATI set hai. Har company ke liye ek dafa
-# `company_leave_types` mein daal diya jata hai, phir CEO (ya policy
-# document se nikli maloomat) inhein badal sakti hai — entitlement 0 kar
-# dena, band kar dena, ya bilkul nayi type add kar dena (maternity, hajj...).
+# This is only the STARTING set. It is inserted once per company into
+# `company_leave_types`, after which the CEO (or information extracted
+# from the policy document) can change it — set the entitlement to 0,
+# disable it, or add an entirely new type (maternity, hajj...).
 DEFAULT_LEAVE_TYPES = [
-    # code,        label,             days, unlimited, cert, notice_days, order
-    ("annual",     "Annual Leave",      15, False, False, 1, 1),
-    ("casual",     "Casual Leave",      10, False, False, 1, 2),
-    ("sick",       "Sick Leave",        10, False, True,  0, 3),
-    ("emergency",  "Emergency Leave",    3, False, False, 0, 4),
-    ("unpaid",     "Unpaid Leave",       0, True,  False, 1, 5),
+    # code,        label,             days, unlimited, cert, notice, order, paid
+    ("annual",     "Annual Leave",      15, False, False, 1, 1, True),
+    ("casual",     "Casual Leave",      10, False, False, 1, 2, True),
+    ("sick",       "Sick Leave",        10, False, True,  0, 3, True),
+    ("emergency",  "Emergency Leave",    3, False, False, 0, 4, True),
+    # Important for payroll — salary is deducted for this one
+    ("unpaid",     "Unpaid Leave",       0, True,  False, 1, 5, False),
 ]
+
+
+# ══════════════════════════════════════════════
+# "Is this leave unpaid?" — inferred from the name
+# ══════════════════════════════════════════════
+# Payroll's `unpaid_leave_deduction` runs solely off
+# `CompanyLeaveType.is_paid`. Types coming from a policy document can be
+# named anything ("Leave Without Pay", "LWP") — and the agent does not
+# always say whether they are paid. In that case the name is all we have.
+#
+# Only words that plainly mean "without pay". Types like "sabbatical",
+# "study" or "hajj" are paid at some companies and not at others —
+# guessing and docking someone's salary would be wrong. When in doubt,
+# always PAID (in the employee's favour).
+#
+# ⚠ The same list also lives in the migration backfill
+# (`migrate_attendance.py` → `backfill_unpaid_leave_types`) — that one is SQL,
+# it is SQL there, so it is written separately; change both together.
+UNPAID_NAME_HINTS = ("unpaid", "without pay", "without_pay",
+                     "no pay", "no_pay", "lwp")
+
+
+def looks_unpaid(*words) -> bool:
+    """Does the type's code/label plainly say "without pay"?"""
+    text = " ".join(str(w or "").lower() for w in words)
+    return any(hint in text for hint in UNPAID_NAME_HINTS)
+
 
 MIN_ADVANCE_DAYS = 1
 
-# Itni lambi request ghalti lagti hai
+# A request longer than this looks like a mistake
 MAX_LEAVE_SPAN_DAYS = 365
 
-# Sick/emergency itni purani tak backdate ho sakti hai
+# Sick/emergency leave may be backdated this far
 MAX_BACKDATE_DAYS = 30
 
-# CEO jawab na de to kitni der baad khud approve — policy se aata hai
+# How long before an unanswered request approves itself — from the policy
 DEFAULT_AUTO_APPROVE_HOURS = 24
 
 # ──── Reason ────
-# Har leave par wajah lazmi hai. CEO ko faisla karna hota hai aur Leave Agent
-# bhi reason ko policy ke saath parhta hai — khali reason dono ko andhera
-# rakhta hai.
+# Every leave needs a reason. The CEO has to decide on it and the Leave
+# Agent reads it alongside the policy — an empty reason leaves both of
+# them in the dark.
 MIN_REASON_LENGTH = 5
 MAX_REASON_LENGTH = 1000
 
-# In statuses wali request dates "ghair-khali" samjhi jati hain
+# Requests in these statuses make their dates "occupied"
 ACTIVE_STATUSES = [
     LeaveStatusEnum.evaluating,
     LeaveStatusEnum.pending,
@@ -91,7 +119,7 @@ class CancelSchema(BaseModel):
 
 
 class LeaveTypeSchema(BaseModel):
-    """CEO nayi type banaye ya maujooda badle"""
+    """The CEO creates a new type or edits an existing one"""
     code: str
     label: Optional[str] = None
     default_entitlement: int = 0
@@ -99,6 +127,17 @@ class LeaveTypeSchema(BaseModel):
     requires_certificate: bool = False
     advance_notice_days: int = 1
     is_enabled: bool = True
+
+    # ──── Is this leave paid? ────
+    # The whole of payroll's `unpaid_leave_deduction` rests on this one
+    # boolean. This field did not exist here before — the column was there
+    # but nothing could write to it, so every NEW type silently became
+    # `paid` (even when the policy said "Leave Without Pay").
+    #
+    # Default TRUE — when in doubt, in the employee's favour. A wrong
+    # FALSE means someone's salary is docked for no reason.
+    is_paid: bool = True
+
     policy_reference: Optional[str] = None
 
 
@@ -110,17 +149,17 @@ def _status_value(status) -> str:
 
 
 def _is_unlimited(db: Session, company_id: int, leave_type: str) -> bool:
-    """Is type ka balance mehdood nahi (misal unpaid)?"""
+    """Is this type's balance unlimited (e.g. unpaid)?"""
     cfg = leave_type_map(db, company_id).get(_status_value(leave_type))
     return bool(cfg and cfg.is_unlimited)
 
 
 def get_leave_types(db: Session, company_id: int) -> List[CompanyLeaveType]:
     """
-    Company ki leave types — pehli baar defaults se seed kar deti hain.
+    The company's leave types — seeded from the defaults on first use.
 
-    Yahi ek jagah hai jahan se types aati hain; code mein kahin hardcoded
-    list nahi rahi.
+    This is the only place types come from; there is no hardcoded list
+    left anywhere in the code.
     """
     types = db.query(CompanyLeaveType).filter(
         CompanyLeaveType.company_id == company_id
@@ -129,13 +168,14 @@ def get_leave_types(db: Session, company_id: int) -> List[CompanyLeaveType]:
     if types:
         return types
 
-    # ──── Pehli dafa — defaults daal do ────
-    for code, label, days, unlimited, cert, notice, order in DEFAULT_LEAVE_TYPES:
+    # ──── First time — seed the defaults ────
+    for code, label, days, unlimited, cert, notice, order, paid in DEFAULT_LEAVE_TYPES:
         db.add(CompanyLeaveType(
             company_id=company_id, code=code, label=label,
             default_entitlement=days, is_unlimited=unlimited,
             requires_certificate=cert, advance_notice_days=notice,
             is_enabled=True, source="default", sort_order=order,
+            is_paid=paid,
         ))
     db.commit()
 
@@ -150,7 +190,7 @@ def leave_type_map(db: Session, company_id: int) -> dict:
 
 
 def _validate_leave_type(db: Session, company_id: int, leave_type: str) -> CompanyLeaveType:
-    """Type company ki list mein hai aur chalu hai?"""
+    """Is the type in this company's list, and enabled?"""
     lt = (leave_type or "").strip().lower()
     types = leave_type_map(db, company_id)
 
@@ -159,31 +199,31 @@ def _validate_leave_type(db: Session, company_id: int, leave_type: str) -> Compa
         allowed = ", ".join(sorted(t.code for t in types.values() if t.is_enabled))
         raise HTTPException(
             status_code=400,
-            detail=f"'{lt}' is company mein maujood nahi. Chalne wali types: {allowed}"
+            detail=f"'{lt}' does not exist for this company. Available types: {allowed}"
         )
 
     if not config.is_enabled:
         raise HTTPException(
             status_code=400,
-            detail=f"{config.label} is waqt band hai — CEO se raabta karein"
+            detail=f"{config.label} is currently disabled — please contact HR"
         )
 
     return config
 
 
 def _validate_reason(reason: str) -> str:
-    """Leave ki wajah lazmi hai — CEO aur agent dono isi par faisla karte hain"""
+    """A reason is mandatory — both the CEO and the agent decide on it"""
     text = (reason or "").strip()
 
     if not text:
         raise HTTPException(
             status_code=400,
-            detail="Leave ki wajah likhna zaroori hai"
+            detail="Please give a reason for your leave"
         )
     if len(text) < MIN_REASON_LENGTH:
         raise HTTPException(
             status_code=400,
-            detail=f"Wajah thori tafseel se likhein (kam se kam "
+            detail=f"Please give a little more detail (at least "
                    f"{MIN_REASON_LENGTH} harf)"
         )
     return text[:MAX_REASON_LENGTH]
@@ -191,11 +231,11 @@ def _validate_reason(reason: str) -> str:
 
 def _suggest_type(types: List[CompanyLeaveType], **match) -> Optional[CompanyLeaveType]:
     """
-    Employee ko concrete mashwara dene ke liye: company ki types mein se
-    aisi type dhundo jo di hui shart par poori utarti ho.
+    So the employee can be given a concrete suggestion: find a type in
+    the company's list that satisfies the given condition.
 
-    Misal: advance notice waali rok lagi to batao ke "Sick Leave use karein" —
-    magar sirf tab jab us company mein waqai koi bina-notice type maujood ho.
+    Example: if the advance-notice rule blocks them, suggest "use Sick
+    Leave" — but only if that company really has a no-notice type.
     """
     for t in types:
         if not t.is_enabled:
@@ -211,16 +251,16 @@ def _parse_dates(start_date: str, end_date: str, config: CompanyLeaveType,
         start = date.fromisoformat(start_date)
         end = date.fromisoformat(end_date)
     except ValueError:
-        raise HTTPException(status_code=400, detail="Date format YYYY-MM-DD hona chahiye")
+        raise HTTPException(status_code=400, detail="Date format must be YYYY-MM-DD")
 
     if end < start:
-        raise HTTPException(status_code=400, detail="End date start date se pehle nahi ho sakti")
+        raise HTTPException(status_code=400, detail="End date cannot be before the start date")
 
     span = (end - start).days + 1
     if span > MAX_LEAVE_SPAN_DAYS:
         raise HTTPException(
             status_code=400,
-            detail=f"Leave {MAX_LEAVE_SPAN_DAYS} din se zyada nahi ho sakti"
+            detail=f"Leave cannot be longer than {MAX_LEAVE_SPAN_DAYS} days"
         )
 
     today = get_pkt_today()
@@ -228,35 +268,35 @@ def _parse_dates(start_date: str, end_date: str, config: CompanyLeaveType,
     notice = config.advance_notice_days or 0
 
     if notice > 0:
-        # ──── Planned leave — itne din pehle apply karni hai ────
+        # ──── Planned leave — must be applied for this many days ahead ────
         earliest = today + timedelta(days=notice)
         if start < earliest:
-            # ──── Bina notice wali koi type ho to naam le kar batao ────
+            # ──── If a no-notice type exists, name it ────
             alt = _suggest_type(all_types or [], advance_notice_days=0)
             tip = (
-                f"Aaj ki chhutti chahiye to {alt.label} use karein."
+                f"If you need leave for today, please use {alt.label}."
                 if alt else
-                "Aaj ki chhutti ke liye koi type maujood nahi — CEO se raabta karein."
+                "There is no leave type available for today — please contact HR."
             )
             raise HTTPException(
                 status_code=400,
-                detail=f"{config.label} kam se kam {notice} din pehle apply "
-                       f"karni hoti hai — sab se pehli mumkin tareekh {earliest} "
-                       f"hai. {tip}"
+                detail=f"{config.label} must be applied for at least {notice} "
+                       f"day(s) in advance — the earliest possible date is "
+                       f"{earliest}. {tip}"
             )
     else:
-        # ──── Usi din ki, ya kuch din purani bhi ────
+        # ──── Same day, or a few days back ────
         if start < today - timedelta(days=MAX_BACKDATE_DAYS):
             raise HTTPException(
                 status_code=400,
-                detail=f"{MAX_BACKDATE_DAYS} din se purani leave apply nahi ho sakti"
+                detail=f"Leave older than {MAX_BACKDATE_DAYS} days cannot be applied for"
             )
 
     return start, end, span
 
 
 def _auto_approve_hours(policy) -> int:
-    """CEO ko jawab dene ke liye kitne ghante — 0 matlab kabhi auto nahi"""
+    """Hours the CEO has to respond — 0 means never auto-approve"""
     if not policy or policy.leave_auto_approve_hours is None:
         return DEFAULT_AUTO_APPROVE_HOURS
     return max(0, policy.leave_auto_approve_hours)
@@ -271,11 +311,12 @@ def get_or_create_balance(
     config: Optional[CompanyLeaveType] = None,
 ) -> LeaveBalance:
     """
-    Balance row lo, na ho to company ki configured entitlement ke saath bana do.
+    Fetch the balance row, or create one using the company's configured
+    entitlement.
 
-    Entitlement ab hardcoded nahi — `company_leave_types` se aati hai.
-    Jo type policy mein na ho uski entitlement 0 hoti hai, to balance bhi
-    0/0 banta hai aur employee us par apply nahi kar sakta.
+    The entitlement is no longer hardcoded — it comes from
+    `company_leave_types`. A type missing from the policy has an
+    entitlement of 0, so the balance is 0/0 and cannot be applied for.
     """
     balance = db.query(LeaveBalance).filter(
         LeaveBalance.employee_id == employee_id,
@@ -313,15 +354,15 @@ def get_or_create_balance(
 def sync_balances_to_config(db: Session, company_id: int, cfg: CompanyLeaveType,
                             year: Optional[int] = None) -> int:
     """
-    Type ki entitlement badle to employees ki MAUJOODA balance rows bhi badlo.
+    When a type's entitlement changes, update employees' EXISTING balance rows too.
 
-    Yeh zaroori hai: `get_or_create_balance` config sirf tab parhta hai jab
-    row PEHLI DAFA banti hai. Us ke baad CEO entitlement 0 kar de to purani
-    rows mein purana adad para rehta hai aur employee ko card dikhta rehta
-    hai — jaise kuch badla hi na ho.
+    This matters: `get_or_create_balance` only reads the config when the
+    row is created for the FIRST time. If the CEO later sets the
+    entitlement to 0, the old number stays in existing rows and the
+    employee keeps seeing the card as though nothing changed.
 
-    `used_days` ko haath nahi lagate — wo guzri hui haqeeqat hai.
-    Remaining dobara hisaab hota hai: max(0, entitlement - used).
+    `used_days` is never touched — it is settled history.
+    Remaining is recomputed: max(0, entitlement - used).
     """
     year = year or get_pkt_today().year
     new_entitlement = 999 if cfg.is_unlimited else (cfg.default_entitlement or 0)
@@ -345,12 +386,12 @@ def sync_balances_to_config(db: Session, company_id: int, cfg: CompanyLeaveType,
 
 
 def _company_ceo(db: Session, company_id: int) -> Optional[User]:
-    """Notification bhejne ke liye CEO ka record — company_id hi uski id hai"""
+    """The CEO record for notifications — company_id IS their user id"""
     return db.query(User).filter(User.id == company_id).first()
 
 
 def _leave_type_label(db: Session, company_id: int, code: str) -> str:
-    """Email mein 'annual' ke bajaye 'Annual Leave' likha jaye"""
+    """Write 'Annual Leave' in emails instead of 'annual'"""
     cfg = leave_type_map(db, company_id).get(_status_value(code))
     return cfg.label if cfg else _status_value(code).replace("_", " ").title()
 
@@ -358,8 +399,8 @@ def _leave_type_label(db: Session, company_id: int, code: str) -> str:
 def _find_overlap(db: Session, employee_id: int, start: date, end: date,
                   exclude_id: Optional[int] = None) -> Optional[LeaveRequest]:
     """
-    In dates pe pehle se koi zinda request to nahi.
-    Overlap ka rule: (existing.start <= new.end) AND (existing.end >= new.start)
+    Is there already a live request on these dates?
+    Overlap rule: (existing.start <= new.end) AND (existing.end >= new.start)
     """
     query = db.query(LeaveRequest).filter(
         LeaveRequest.employee_id == employee_id,
@@ -389,20 +430,20 @@ def _restore(balance: LeaveBalance, days: int):
 # ══════════════════════════════════════════════
 def _auto_approve_overdue(db: Session, company_id: int) -> int:
     """
-    CEO ne muqarrara waqt mein jawab nahi diya → balance ho to khud approve.
+    The CEO did not respond in time → approve automatically if the balance allows.
 
-    Har leave request pehle CEO ke paas jati hai (us din koi zaroori meeting
-    ho sakti hai jo sirf CEO ko pata ho). Magar employee hamesha ke liye
-    latka nahi rehna chahiye — isliye deadline ke baad khud approve.
+    Every leave request goes to the CEO first (there may be an important
+    meeting that day which only they know about). But an employee should
+    not be left hanging forever — hence the deadline.
 
-    NAHI hoti agar:
-      - CEO ne us leave type pe manual override lagaya ho (usne saaf kaha
-        hai "main khud dekhunga")
-      - balance kam ho
-      - policy mein hours = 0 ho (CEO ne auto-approve band kar diya)
+    It does NOT happen if:
+      - the CEO put a manual override on that leave type (they explicitly
+        said "I will look at these myself")
+      - the balance is short
+      - the policy has hours = 0 (the CEO switched auto-approve off)
 
-    Yeh function READ endpoints se chalta hai (koi cron nahi). Fail ho jaye
-    to listing nahi rukni chahiye — isliye caller try/except mein chalata hai.
+    This runs from READ endpoints (there is no cron). If it fails the
+    listing must still work — so the caller wraps it in try/except.
     """
     policy = db.query(CompanyWorkPolicy).filter(
         CompanyWorkPolicy.company_id == company_id
@@ -424,7 +465,7 @@ def _auto_approve_overdue(db: Session, company_id: int) -> int:
     if not stale:
         return 0
 
-    # ──── Jin types pe CEO ne khud dekhne ka kaha hai ────
+    # ──── Types the CEO asked to review personally ────
     overridden = {
         _status_value(o.leave_type)
         for o in db.query(CompanyPolicyOverride).filter(
@@ -435,7 +476,7 @@ def _auto_approve_overdue(db: Session, company_id: int) -> int:
 
     ceo = _company_ceo(db, company_id)
     types = leave_type_map(db, company_id)
-    notify_queue = []          # commit ke BAAD bhejenge
+    notify_queue = []          # sent AFTER the commit
 
     approved = 0
     for req in stale:
@@ -450,7 +491,7 @@ def _auto_approve_overdue(db: Session, company_id: int) -> int:
 
         if not _is_unlimited(db, company_id, leave_type):
             if balance.remaining_days < days:
-                # ──── Balance kam — CEO hi faisla kare ────
+                # ──── Balance is short — let the CEO decide ────
                 continue
             _deduct(balance, days)
 
@@ -459,11 +500,11 @@ def _auto_approve_overdue(db: Session, company_id: int) -> int:
         req.decided_at = now
         req.payroll_notified = True
         req.ceo_note = (
-            f"Auto-approved — CEO ne {hours} ghante mein jawab nahi diya"
+            f"Auto-approved — no response within {hours} hours"
         )
         approved += 1
 
-        # ──── Email ka saman jama karo (abhi mat bhejo — commit baqi hai) ────
+        # ──── Collect the emails (do not send yet — the commit is pending) ────
         employee = db.query(User).filter(User.id == req.employee_id).first()
         cfg = types.get(leave_type)
         notify_queue.append({
@@ -477,9 +518,9 @@ def _auto_approve_overdue(db: Session, company_id: int) -> int:
         db.commit()
         print(f"[leave] {approved} request(s) auto-approved (company {company_id})")
 
-        # ──── Ab bhejo — DB mehfooz hone ke baad ────
-        # Warna commit fail ho jaye aur email ja chuki ho, to employee ko
-        # aisi approval ki khabar milti jo hui hi nahi
+        # ──── Send now — after the DB is safe ────
+        # Otherwise a failed commit with the email already gone would tell
+        # the employee about an approval that never happened
         for item in notify_queue:
             emp = item["employee"]
             if emp and emp.email:
@@ -508,19 +549,19 @@ def _auto_approve_overdue(db: Session, company_id: int) -> int:
 
 
 def _run_auto_approve(db: Session, company_id: Optional[int]):
-    """Listing dikhane se pehle overdue requests nipta do — chup chaap"""
+    """Settle overdue requests before showing a listing — quietly"""
     if not company_id:
         return
     try:
         _auto_approve_overdue(db, company_id)
     except Exception as e:
-        # ──── Sweep fail ho to bhi listing chalni chahiye ────
+        # ──── The listing must work even if the sweep fails ────
         db.rollback()
         print(f"[leave] auto-approve sweep failed: {e}")
 
 
 def _auto_approve_at(req: LeaveRequest, hours: int) -> Optional[str]:
-    """Yeh request kab khud approve ho jayegi (pending ho to)"""
+    """When this request will approve itself (if it is still pending)"""
     if hours == 0 or not req.created_at:
         return None
     if _status_value(req.status) != "pending":
@@ -533,10 +574,10 @@ def _leave_out(req: LeaveRequest, employee: Optional[User] = None,
                doc: Optional["LeaveDocument"] = None,
                has_doc: Optional[bool] = None) -> dict:
     """
-    Har jagah ek hi shape — frontend ko andaza na lagana pade.
+    One shape everywhere — the frontend should never have to guess.
 
-    has_doc: documents table se aaya hua jawab. None ho to purane
-    file-path column pe fall back karte hain (legacy rows).
+    has_doc: the answer from the documents table. When None we fall back
+    to the old file-path column (legacy rows).
     """
     if has_doc is None:
         has_doc = doc is not None or req.medical_certificate is not None
@@ -564,7 +605,7 @@ def _leave_out(req: LeaveRequest, employee: Optional[User] = None,
         "ceo_note": req.ceo_note,
         "created_at": str(req.created_at) if req.created_at else None,
 
-        # ──── Agent ka faisla (audit trail) ────
+        # ──── The agent's decision (audit trail) ────
         "agent_decision": log.decision if log else None,
         "agent_reason": log.reason if log else None,
         "policy_reference": log.policy_reference if log else None,
@@ -572,7 +613,7 @@ def _leave_out(req: LeaveRequest, employee: Optional[User] = None,
 
 
 def _logs_for(db: Session, leave_ids: List[int]) -> dict:
-    """Sab decision logs ek query mein (N+1 se bachne ke liye)"""
+    """All decision logs in one query (to avoid N+1)"""
     if not leave_ids:
         return {}
     logs = db.query(PolicyDecisionLog).filter(
@@ -583,8 +624,8 @@ def _logs_for(db: Session, leave_ids: List[int]) -> dict:
 
 def _docs_for(db: Session, leave_ids: List[int]) -> dict:
     """
-    Kis request ke saath document laga hai — ek query mein.
-    `file_data` deliberately load NAHI karte, warna listing megabytes uthati.
+    Which requests have a document attached — in one query.
+    `file_data` is deliberately NOT loaded, or the listing would drag megabytes.
     """
     if not leave_ids:
         return {}
@@ -602,7 +643,7 @@ def _docs_for(db: Session, leave_ids: List[int]) -> dict:
 
 def _leave_rows(db: Session, requests: List[LeaveRequest],
                 employees: dict = None, auto_hours: int = 0) -> List[dict]:
-    """Requests ki list ko rows mein badlo — logs aur docs ek-ek query mein"""
+    """Turn a list of requests into rows — logs and docs in one query each"""
     ids = [r.id for r in requests]
     logs = _logs_for(db, ids)
     docs = _docs_for(db, ids)
@@ -633,9 +674,9 @@ async def submit_leave_request(
     start_date: str = Form(...),
     end_date: str = Form(...),
     reason: str = Form(""),
-    # ↑ FastAPI ke level par optional rakha hai jaan bujh kar —
-    #   `Form(...)` khali value par raw 422 "Field required" deta hai.
-    #   `_validate_reason()` neeche saaf Hinglish message ke saath 400 deta hai.
+    # ↑ Deliberately optional at the FastAPI level —
+    #   `Form(...)` returns a raw 422 "Field required" on an empty value.
+    #   `_validate_reason()` below returns a 400 with a clear message.
     medical_certificate: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
@@ -643,10 +684,10 @@ async def submit_leave_request(
     """
     Employee leave request kare → Leave Agent (RAG + LLM) evaluate karega.
 
-    Agent se PEHLE kuch deterministic guards chalte hain — LLM ko wahi
-    faisle karne dete hain jo waqai judgment maangte hain.
+    A few deterministic guards run BEFORE the agent — the LLM only gets
+    the decisions that genuinely need judgement.
     """
-    # ──── Apne liye hi (CEO kisi aur ke naam pe bhi laga sakta hai) ────
+    # ──── Only for yourself (the CEO may file on someone else's behalf) ────
     if current_user["role"] not in ("ceo", "superadmin"):
         assert_self(current_user, employee_id, "leave apply")
 
@@ -665,11 +706,11 @@ async def submit_leave_request(
     if clash:
         raise HTTPException(
             status_code=400,
-            detail=f"In dates pe pehle se ek request maujood hai "
-                   f"({clash.start_date} se {clash.end_date}, status: {_status_value(clash.status)})"
+            detail=f"A request already exists on these dates "
+                   f"({clash.start_date} to {clash.end_date}, status: {_status_value(clash.status)})"
         )
 
-    # ──── Working days ginno — balance sirf inhi ka katega ────
+    # ──── Count working days — only these come off the balance ────
     work_policy = db.query(CompanyWorkPolicy).filter(
         CompanyWorkPolicy.company_id == company_id
     ).first()
@@ -678,12 +719,12 @@ async def submit_leave_request(
     if deductible_days == 0:
         raise HTTPException(
             status_code=400,
-            detail="In dates mein koi working day nahi hai — leave ki zarurat nahi"
+            detail="There is no working day in these dates — no leave is needed"
         )
 
-    # ──── Medical certificate — DB ke liye tayyar karo ────
-    # Yahan sirf validate + compress karte hain. DB mein tab daalte hain
-    # jab leave request ki id mil jaye (neeche).
+    # ──── Medical certificate — prepare it for the DB ────
+    # Only validated and compressed here. It is written to the DB once the
+    # leave request has an id (below).
     prepared_cert = None
     if medical_certificate and medical_certificate.filename:
         try:
@@ -696,33 +737,33 @@ async def submit_leave_request(
 
     has_medical_cert = prepared_cert is not None
 
-    # ──── Balance (leave ke SAAL ka, aaj ka nahi) ────
+    # ──── Balance (for the leave's YEAR, not today's) ────
     balance = get_or_create_balance(db, employee_id, company_id, leave_type, start.year)
 
-    # ═══ Balance bilkul khatam → request banti hi nahi ═══
-    # Pehle yeh request CEO ke paas chali jati thi. Magar jab CEO ne khud
-    # is type ka balance 0 kiya hai to us se dobara poochne ka koi matlab
-    # nahi — employee ko wahin rok do.
+    # ═══ Balance completely used up → the request is never created ═══
+    # This used to go to the CEO. But when the CEO themselves set this
+    # type's balance to 0, there is no point asking them again — stop the
+    # employee right here.
     if not type_config.is_unlimited and balance.remaining_days <= 0:
         alt = _suggest_type(all_types, is_unlimited=True)
-        tip = (f"{alt.label} use karein ya CEO se balance barhwayein"
-               if alt else "CEO se balance barhwayein")
+        tip = (f"Please use {alt.label}, or ask HR to review your balance"
+               if alt else "Please ask HR to review your balance")
         raise HTTPException(
             status_code=400,
-            detail=f"{type_config.label} ka balance khatam hai "
-                   f"(0/{balance.total_entitlement} din). Is type par apply "
-                   f"nahi ho sakti — {tip}."
+            detail=f"Your {type_config.label} balance is finished "
+                   f"(0/{balance.total_entitlement} days). You cannot apply "
+                   f"for this type — {tip}."
         )
 
-    # ═══ Sick leave → medical certificate lazmi ═══
+    # ═══ Sick leave → a medical certificate is required ═══
     if type_config.requires_certificate and not prepared_cert:
         alt = _suggest_type(all_types, requires_certificate=False,
                             advance_notice_days=type_config.advance_notice_days)
-        tip = (f" Certificate na ho to {alt.label} use karein." if alt else "")
+        tip = (f" If you do not have one, please use {alt.label}." if alt else "")
         raise HTTPException(
             status_code=400,
-            detail=f"{type_config.label} ke saath medical certificate lagana "
-                   f"zaroori hai (PDF ya image).{tip}"
+            detail=f"A medical certificate must be attached with "
+                   f"{type_config.label} (PDF or image).{tip}"
         )
 
     # ──── Request save ────
@@ -739,7 +780,7 @@ async def submit_leave_request(
         created_at=get_pkt_now(),
     )
     db.add(leave_req)
-    db.flush()          # leave_req.id chahiye document ke liye
+    db.flush()          # leave_req.id is needed for the document
 
     if prepared_cert:
         db.add(LeaveDocument(
@@ -765,12 +806,12 @@ async def submit_leave_request(
     def to_ceo(reason_text: str, agent_result: Optional[dict] = None,
                recommendation: Optional[str] = None):
         """
-        Har request CEO ke paas jati hai — koi foran auto-approve nahi.
+        Every request goes to the CEO — nothing is auto-approved on the spot.
 
-        Wajah: jis din employee chhutti maang raha hai us din koi zaroori
-        meeting ho sakti hai, aur wo sirf CEO ko pata hoti hai. Policy
-        theek bhi ho to bhi CEO ko dekhne ka mauqa milna chahiye.
-        Balance maujood ho to deadline ke baad khud approve ho jayegi.
+        Why: there may be an important meeting on the requested day, and
+        only the CEO knows about it. Even when the policy is satisfied,
+        the CEO deserves a chance to look. If the balance allows, it
+        approves itself once the deadline passes.
         """
         leave_req.status = LeaveStatusEnum.pending
         if agent_result:
@@ -780,7 +821,7 @@ async def submit_leave_request(
 
         auto_at = _auto_approve_at(leave_req, auto_hours)
 
-        # ──── CEO ko ittila — background mein, request nahi rukti ────
+        # ──── Notify the CEO — in the background, the request never waits ────
         ceo = _company_ceo(db, company_id)
         if ceo and ceo.email:
             notify.leave_submitted_to_ceo(
@@ -796,21 +837,21 @@ async def submit_leave_request(
             )
 
         return {
-            "message": "Leave request bhej di gayi — CEO approval ka intezar",
+            "message": "Leave request sent — waiting for HR approval",
             "leave_id": leave_req.id,
             "status": "pending",
             "reason": reason_text,
-            # ──── Agent ne kya mashwara diya (faisla nahi) ────
+            # ──── What the agent recommended (not a decision) ────
             "agent_recommendation": recommendation,
             "policy_reference": (agent_result or {}).get("policy_reference", ""),
-            # ──── CEO chup raha to kab khud approve hogi ────
+            # ──── When it will approve itself if the CEO stays silent ────
             "auto_approve_at": auto_at,
             "auto_approve_hours": auto_hours if auto_at else None,
             "total_days": total_days,
             "deductible_days": deductible_days,
         }
 
-    # ═══ Guard 1: CEO ne is leave type pe manual override lagaya hai ═══
+    # ═══ Guard 1: the CEO set a manual override on this leave type ═══
     override = db.query(CompanyPolicyOverride).filter(
         CompanyPolicyOverride.company_id == company_id,
         CompanyPolicyOverride.leave_type == leave_type,
@@ -822,33 +863,33 @@ async def submit_leave_request(
             recommendation="manual_only",
         )
 
-    # ═══ Guard 2: Balance poora nahi par ra ═══
-    # Bilkul zero upar hi block ho chuka. Yahan wo surat hai jahan kuch din
-    # bache hain magar poore nahi (misal 2 bache, 4 chahiye) — CEO faisla kare
-    # ke baqi din unpaid treat karne hain ya nahi. Agent ko bulane ki zarurat
-    # nahi, yeh arithmetic hai.
+    # ═══ Guard 2: the balance does not fully cover it ═══
+    # A balance of exactly zero was already blocked above. This is the case
+    # where some days are left but not enough (say 2 left, 4 needed) — the
+    # CEO decides whether to treat the rest as unpaid. No need to call the
+    # agent; this is arithmetic.
     if not type_config.is_unlimited and balance.remaining_days < deductible_days:
         return to_ceo(
-            f"Balance poora nahi — {deductible_days} working days chahiye, "
-            f"sirf {balance.remaining_days} bache hain",
+            f"Balance does not cover it — {deductible_days} working days "
+            f"needed, only {balance.remaining_days} left",
             recommendation="insufficient_balance",
         )
 
-    # ═══ Guard 3: Policy document hi upload nahi hui ═══
-    # Bina policy ke agent koi mashwara nahi de sakta
+    # ═══ Guard 3: no policy document has been uploaded ═══
+    # Without a policy the agent cannot recommend anything
     active_policy = db.query(CompanyPolicy).filter(
         CompanyPolicy.company_id == company_id,
         CompanyPolicy.is_active == True
     ).first()
     if not active_policy:
         return to_ceo(
-            "Company policy document upload nahi hui — agent mashwara nahi de saka"
+            "No company policy document has been uploaded — the agent could not advise"
         )
 
     # ═══ Leave Agent (RAG + LLM) ═══
     try:
-        # Import bhi try ke andar — GROQ_API_KEY missing ho ya koi ML
-        # package toota ho to poori request 500 na ho jaye
+        # The import is inside the try too — a missing GROQ_API_KEY or a
+        # broken ML package must not turn the whole request into a 500
         from app.agents.leave_agent import evaluate_leave_request
 
         agent_result = evaluate_leave_request(
@@ -863,12 +904,12 @@ async def submit_leave_request(
             leave_balance=balance.remaining_days,
         )
     except Exception as e:
-        # ──── Groq down ho ya kuch bhi phate — request phansi na rahe ────
+        # ──── Groq down, or anything else breaking — the request must not get stuck ────
         print(f"Leave agent failed: {e}")
-        return to_ceo("Agent abhi dastyab nahi — CEO manually review karega")
+        return to_ceo("The agent is unavailable — HR will review this manually")
 
-    # ═══ Agent ka faisla ab MASHWARA hai, hukm nahi ═══
-    # Policy theek bhi ho to bhi request CEO ke paas jayegi
+    # ═══ The agent's verdict is a RECOMMENDATION, not an order ═══
+    # Even when the policy is satisfied, the request still goes to the CEO
     recommendation = (
         "approve" if agent_result.get("decision") == "auto_approve" else "review"
     )
@@ -881,7 +922,7 @@ async def submit_leave_request(
 
 def _save_decision_log(db: Session, leave_req: LeaveRequest,
                        company_id: int, agent_result: dict):
-    """RAG + LLM ka poora audit trail — baad mein sawal ho to jawab mile"""
+    """The full RAG + LLM audit trail — so later questions have an answer"""
     active_policy = db.query(CompanyPolicy).filter(
         CompanyPolicy.company_id == company_id,
         CompanyPolicy.is_active == True
@@ -915,7 +956,7 @@ def get_pending_leaves(
 ):
     ceo = get_user_or_404(db, current_user["user_id"])
 
-    # ──── Jo requests deadline paar kar chuki hain wo pehle nipta do ────
+    # ──── Settle any requests that have passed their deadline first ────
     _run_auto_approve(db, ceo.id)
 
     pending = db.query(LeaveRequest).filter(
@@ -931,7 +972,7 @@ def get_pending_leaves(
     employees = {e.id: e for e in company_employees(db, ceo)}
     result = _leave_rows(db, pending, employees, auto_hours)
 
-    # ──── CEO ko balance bhi dikhe faisla lete waqt ────
+    # ──── The CEO should see the balance while deciding ────
     for row, req in zip(result, pending):
         balance = db.query(LeaveBalance).filter(
             LeaveBalance.employee_id == req.employee_id,
@@ -941,7 +982,7 @@ def get_pending_leaves(
         row["remaining_balance"] = balance.remaining_days if balance else None
         row["total_entitlement"] = balance.total_entitlement if balance else None
 
-        # ──── employee CEO ki list mein na ho (misal khud CEO) ────
+        # ──── The employee may not be in the CEO's list (e.g. the CEO) ────
         if not row["employee_name"]:
             emp = db.query(User).filter(User.id == req.employee_id).first()
             row["employee_name"] = emp.full_name if emp else "—"
@@ -972,7 +1013,7 @@ def approve_leave(
     ).first()
 
     if not leave_req:
-        raise HTTPException(status_code=404, detail="Pending request nahi mili")
+        raise HTTPException(status_code=404, detail="Pending request not found")
 
     days = leave_req.deductible_days or leave_req.total_days
     balance = get_or_create_balance(
@@ -986,8 +1027,8 @@ def approve_leave(
     leave_req.ceo_note = data.ceo_note
     leave_req.payroll_notified = True
 
-    # ──── Balance kam ho to bhi CEO ka faisla chalega, magar chupke se
-    #      deduct chhodna galat hai — batao kitna over ho gaya ────
+    # ──── The CEO's decision stands even on a short balance, but silently
+    #      skipping the deduction would be wrong — report the overrun ────
     over_limit = False
     if not _is_unlimited(db, leave_req.company_id, leave_req.leave_type):
         over_limit = balance.remaining_days < days
@@ -1016,7 +1057,7 @@ def approve_leave(
         "days_deducted": days,
         "remaining_balance": balance.remaining_days,
         "over_entitlement": over_limit,
-        "note": "Balance se zyada approve hui — unpaid treat karein" if over_limit else None,
+        "note": "Approved beyond the balance — treat the excess as unpaid" if over_limit else None,
     }
 
 
@@ -1039,14 +1080,14 @@ def reject_leave(
     ).first()
 
     if not leave_req:
-        raise HTTPException(status_code=404, detail="Pending request nahi mili")
+        raise HTTPException(status_code=404, detail="Pending request not found")
 
-    # ──── Reject ki wajah lazmi — employee ko pata to chale kyun hui ────
+    # ──── A rejection reason is mandatory — the employee must know why ────
     note = (data.ceo_note or "").strip()
     if not note:
         raise HTTPException(
             status_code=400,
-            detail="Reject karne ki wajah likhna zaroori hai — employee ko yahi dikhegi"
+            detail="A reason is required to reject — this is what the employee will see"
         )
 
     leave_req.status = LeaveStatusEnum.rejected
@@ -1056,7 +1097,7 @@ def reject_leave(
 
     db.commit()
 
-    # ──── Employee ko wajah ke saath batao ────
+    # ──── Tell the employee, with the reason ────
     employee = db.query(User).filter(User.id == leave_req.employee_id).first()
     if employee and employee.email:
         notify.leave_decision_to_employee(
@@ -1084,24 +1125,24 @@ def cancel_leave(
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Pending request kabhi bhi cancel ho sakti hai.
+    A pending request can be cancelled at any time.
 
-    Approved leave employee sirf tab cancel kar sakta hai jab wo abhi SHURU
-    na hui ho — 12 tareekh ki chhutti 12 ko cancel karne ka matlab nahi,
-    us din ki attendance ka hisaab pehle hi badal chuka hota hai.
+    An employee can only cancel approved leave that has not STARTED yet —
+    cancelling leave for the 12th on the 12th makes no sense, that day's
+    attendance has already been counted differently.
 
-    CEO shuru ho chuki leave bhi cancel kar sakta hai (misal banda asal mein
-    aa gaya) — dono surat mein balance wapis mil jata hai.
+    The CEO can cancel leave that has already started (say the person
+    turned up after all) — either way the balance is returned.
     """
     leave_req = db.query(LeaveRequest).filter(LeaveRequest.id == leave_id).first()
     if not leave_req:
-        raise HTTPException(status_code=404, detail="Leave request nahi mili")
+        raise HTTPException(status_code=404, detail="Leave request not found")
 
     assert_can_view(db, current_user, leave_req.employee_id)
 
     status = _status_value(leave_req.status)
     if status in ("rejected", "cancelled"):
-        raise HTTPException(status_code=400, detail=f"Yeh request pehle se {status} hai")
+        raise HTTPException(status_code=400, detail=f"This request is already {status}")
 
     today = get_pkt_today()
     is_ceo = current_user["role"] in ("ceo", "superadmin")
@@ -1109,11 +1150,11 @@ def cancel_leave(
     if status == "approved" and leave_req.start_date <= today and not is_ceo:
         raise HTTPException(
             status_code=400,
-            detail=f"Leave {leave_req.start_date} ko shuru ho chuki hai — "
-                   f"ab employee khud cancel nahi kar sakta. CEO cancel kar sakta hai."
+            detail=f"This leave started on {leave_req.start_date} — it can no "
+                   f"longer be cancelled by the employee. Please contact HR."
         )
 
-    # ──── Approved thi to balance wapis karo ────
+    # ──── If it was approved, return the balance ────
     restored = 0
     if status == "approved" and not _is_unlimited(
             db, leave_req.company_id, leave_req.leave_type):
@@ -1129,7 +1170,7 @@ def cancel_leave(
     leave_req.ceo_note = (data.reason or "").strip() or leave_req.ceo_note
     db.commit()
 
-    # ──── Employee ne cancel ki to CEO ko batao (CEO ne ki to nahi) ────
+    # ──── If the employee cancelled, tell the CEO (not if the CEO did) ────
     ceo = _company_ceo(db, leave_req.company_id)
     employee = db.query(User).filter(User.id == leave_req.employee_id).first()
     if ceo and ceo.email and employee:
@@ -1144,7 +1185,7 @@ def cancel_leave(
         )
 
     return {
-        "message": "Leave cancel ho gayi",
+        "message": "Leave cancelled",
         "leave_id": leave_id,
         "status": "cancelled",
         "days_restored": restored,
@@ -1165,7 +1206,7 @@ def get_leave_balance(
     year = year or get_pkt_today().year
     company_id = resolve_company_id(db, employee) or employee_id
 
-    # ──── Types company ki config se — hardcoded list nahi ────
+    # ──── Types come from the company config — no hardcoded list ────
     balances = []
     for cfg in get_leave_types(db, company_id):
         if not cfg.is_enabled:
@@ -1179,15 +1220,18 @@ def get_leave_balance(
             "used_days": b.used_days,
             "remaining_days": b.remaining_days,
             "unlimited": cfg.is_unlimited,
-            # ──── Is type ke apne rules — UI inhi se guide karta hai ────
+            # ──── This type's own rules — the UI is driven by these ────
             "requires_certificate": cfg.requires_certificate,
             "advance_notice_days": cfg.advance_notice_days or 0,
+            # The employee must know BEFORE applying that this leave costs
+            # salary — finding out later from the payslip feels like a trick
+            "is_paid": cfg.is_paid,
             "source": cfg.source,
             "policy_reference": cfg.policy_reference,
         })
     db.commit()
 
-    # ──── Abhi zer-e-ghaur requests (balance abhi kata nahi) ────
+    # ──── Requests still under review (balance not deducted yet) ────
     pending_days = db.query(LeaveRequest).filter(
         LeaveRequest.employee_id == employee_id,
         LeaveRequest.status.in_([LeaveStatusEnum.pending, LeaveStatusEnum.evaluating]),
@@ -1216,7 +1260,7 @@ def get_leave_history(
     employee = assert_can_view(db, current_user, employee_id)
     company_id = resolve_company_id(db, employee)
 
-    # ──── Deadline paar kar chuki requests pehle nipta do ────
+    # ──── Settle any past-deadline requests first ────
     _run_auto_approve(db, company_id)
 
     query = db.query(LeaveRequest).filter(LeaveRequest.employee_id == employee_id)
@@ -1258,7 +1302,7 @@ def adjust_balance(
 
     new_entitlement = (balance.total_entitlement or 0) + data.adjustment
     if new_entitlement < 0:
-        raise HTTPException(status_code=400, detail="Entitlement manfi nahi ho sakti")
+        raise HTTPException(status_code=400, detail="Entitlement cannot be negative")
 
     balance.total_entitlement = new_entitlement
     balance.remaining_days = max(0, new_entitlement - (balance.used_days or 0))
@@ -1316,7 +1360,7 @@ def get_all_leaves(
 
 
 # ══════════════════════════════════════════════
-# Route 10: CEO — Team leave calendar (kaun kab chhutti pe hai)
+# Route 10: CEO — Team leave calendar (who is off, and when)
 # ══════════════════════════════════════════════
 @router.get("/calendar")
 def get_leave_calendar(
@@ -1325,7 +1369,7 @@ def get_leave_calendar(
     db: Session = Depends(get_db),
     current_user: dict = Depends(require_ceo)
 ):
-    """Approved leaves ki list — CEO dekh sake kis din kitne log ghair-hazir hain"""
+    """List of approved leaves — so the CEO can see who is away on which day"""
     ceo = get_user_or_404(db, current_user["user_id"])
     today = get_pkt_today()
 
@@ -1333,7 +1377,7 @@ def get_leave_calendar(
         start = date.fromisoformat(from_date) if from_date else today
         end = date.fromisoformat(to_date) if to_date else today + timedelta(days=30)
     except ValueError:
-        raise HTTPException(status_code=400, detail="Date format YYYY-MM-DD hona chahiye")
+        raise HTTPException(status_code=400, detail="Date format must be YYYY-MM-DD")
 
     approved = db.query(LeaveRequest).filter(
         LeaveRequest.company_id == ceo.id,
@@ -1361,8 +1405,8 @@ def list_leave_types(
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Company ki leave types. Employee ko sirf chalu types dikhti hain,
-    CEO ko sab (band ki hui bhi, taake wapas on kar sake).
+    The company's leave types. Employees see only enabled ones; the CEO
+    sees all of them (including disabled, so they can switch them back on).
     """
     user = get_user_or_404(db, current_user["user_id"])
     company_id = resolve_company_id(db, user) or user.id
@@ -1384,6 +1428,7 @@ def list_leave_types(
                 "requires_certificate": t.requires_certificate,
                 "advance_notice_days": t.advance_notice_days or 0,
                 "is_enabled": t.is_enabled,
+                "is_paid": t.is_paid,
                 "source": t.source,
                 "policy_reference": t.policy_reference,
                 "sort_order": t.sort_order,
@@ -1394,7 +1439,7 @@ def list_leave_types(
 
 
 # ══════════════════════════════════════════════
-# Route 14: Leave Type — banao ya badlo (CEO)
+# Route 14: Leave type — create or update (CEO)
 # ══════════════════════════════════════════════
 @router.put("/types")
 def upsert_leave_type(
@@ -1403,26 +1448,26 @@ def upsert_leave_type(
     current_user: dict = Depends(require_ceo)
 ):
     """
-    Type maujood ho to update, warna nayi bana do.
+    Update the type if it exists, otherwise create it.
 
-    Entitlement 0 kar dena = wo type dikhti to hai magar us par apply nahi
-    ho sakti (zero-balance rule khud rok deta hai). Policy document mein
-    koi type na ho to yahi karte hain.
+    Setting the entitlement to 0 means the type is still visible but
+    cannot be applied for (the zero-balance rule blocks it). This is what
+    happens to a type missing from the policy document.
     """
     ceo = get_user_or_404(db, current_user["user_id"])
     code = (data.code or "").strip().lower().replace(" ", "_")
 
     if not code:
-        raise HTTPException(status_code=400, detail="Type ka code chahiye")
+        raise HTTPException(status_code=400, detail="The type needs a code")
     if not code.replace("_", "").isalnum():
         raise HTTPException(
             status_code=400,
-            detail="Code mein sirf harf, adad aur underscore chalte hain"
+            detail="A code may only contain letters, digits and underscores"
         )
     if data.default_entitlement < 0:
-        raise HTTPException(status_code=400, detail="Entitlement manfi nahi ho sakti")
+        raise HTTPException(status_code=400, detail="Entitlement cannot be negative")
 
-    get_leave_types(db, ceo.id)          # pehli dafa ho to defaults seed ho jayein
+    get_leave_types(db, ceo.id)          # seed the defaults on first use
 
     existing = db.query(CompanyLeaveType).filter(
         CompanyLeaveType.company_id == ceo.id,
@@ -1446,11 +1491,12 @@ def upsert_leave_type(
     existing.requires_certificate = data.requires_certificate
     existing.advance_notice_days = max(0, data.advance_notice_days)
     existing.is_enabled = data.is_enabled
+    existing.is_paid = data.is_paid
     if data.policy_reference is not None:
         existing.policy_reference = data.policy_reference
     existing.updated_at = get_pkt_now()
 
-    # ──── Employees ki maujooda balance rows bhi sync karo ────
+    # ──── Sync employees' existing balance rows too ────
     db.flush()
     synced = sync_balances_to_config(db, ceo.id, existing)
 
@@ -1459,29 +1505,36 @@ def upsert_leave_type(
 
     notes = []
     if not existing.is_unlimited and existing.default_entitlement == 0:
-        notes.append("Entitlement 0 hai — employee is type par apply nahi kar sakega")
+        notes.append("Entitlement is 0 — employees will not be able to apply for this type")
     if not existing.is_enabled:
-        notes.append("Band hai — employee ko yeh type dikhti hi nahi")
+        notes.append("Disabled — employees will not see this type at all")
+    if not existing.is_paid:
+        # The CEO must clearly see that this toggle affects MONEY
+        notes.append(
+            "This type is UNPAID — payroll will deduct for each "
+            "day of it"
+        )
     if synced:
-        notes.append(f"{synced} employee(s) ka balance update ho gaya")
+        notes.append(f"{synced} employee balance(s) updated")
 
     return {
-        "message": f"{existing.label} {'bana di gayi' if created else 'update ho gayi'}",
+        "message": f"{existing.label} {'created' if created else 'updated'}",
         "created": created,
         "code": existing.code,
+        "is_paid": existing.is_paid,
         "balances_synced": synced,
         "note": " · ".join(notes) if notes else None,
     }
 
 
 # ══════════════════════════════════════════════
-# Route 16: Policy se leave types nikalo (CEO)
+# Route 16: Extract leave types from the policy (CEO)
 # ══════════════════════════════════════════════
 class ApplyTypesSchema(BaseModel):
-    """CEO ne review kar ke jo types confirm kin"""
+    """The types the CEO reviewed and confirmed"""
     types: List[LeaveTypeSchema]
     disable_missing: bool = False
-    # ↑ True = jo types policy mein nahi mili unki entitlement 0 kar do
+    # ↑ True = set the entitlement of types missing from the policy to 0
 
 
 @router.post("/types/extract")
@@ -1490,14 +1543,14 @@ def extract_types_from_policy(
     current_user: dict = Depends(require_ceo)
 ):
     """
-    Policy document parh kar leave types TAJWEEZ karo.
+    Read the policy document and SUGGEST leave types.
 
-    Yeh kuch save NAHI karta — sirf mashwara deta hai. CEO review kar ke
-    `/types/apply` par confirm karta hai. LLM ki ghalti seedha employees
-    ke balance mein nahi jaati.
+    This saves NOTHING — it only advises. The CEO reviews and confirms via
+    `/types/apply`. An LLM mistake never lands straight in an employee's
+    balance.
 
-    Har tajweez ke saath `source_quote` aata hai — document ki wo asal line
-    jis se value nikli, taake CEO khud tasdeeq kar sake.
+    Every suggestion carries a `source_quote` — the exact line in the
+    document it came from, so the CEO can verify it themselves.
     """
     ceo = get_user_or_404(db, current_user["user_id"])
 
@@ -1509,7 +1562,7 @@ def extract_types_from_policy(
     if not active_policy:
         raise HTTPException(
             status_code=400,
-            detail="Koi active policy document nahi — pehle Settings se upload karein"
+            detail="No active policy document — please upload one from Settings first"
         )
 
     try:
@@ -1519,13 +1572,13 @@ def extract_types_from_policy(
         print(f"Policy extraction failed: {e}")
         raise HTTPException(
             status_code=503,
-            detail="Agent abhi dastyab nahi — types manually banayein"
+            detail="The agent is unavailable — please create the types manually"
         )
 
     existing = leave_type_map(db, ceo.id)
     suggested_codes = {t["code"] for t in result["types"]}
 
-    # ──── Har tajweez ko maujooda haalat ke saath milao ────
+    # ──── Match each suggestion against the current state ────
     for t in result["types"]:
         current = existing.get(t["code"])
         t["is_new"] = current is None
@@ -1534,7 +1587,18 @@ def extract_types_from_policy(
             current and current.default_entitlement != t["days_per_year"]
         )
 
-    # ──── Jo maujooda types policy mein NAHI mili ────
+        # ──── The paid/unpaid decision is settled HERE ────
+        # The agent may send `None` (the document is silent). The UI does
+        # not need to understand three states — it needs the value that
+        # will actually be applied, plus whether it came from the document.
+        # (The same order `apply_policy_types()` uses internally.)
+        t["paid_from_policy"] = t["is_paid"] is not None
+        if t["is_paid"] is None:
+            t["is_paid"] = current.is_paid if current else True
+        t["current_is_paid"] = current.is_paid if current else None
+        t["changes_paid"] = bool(current and current.is_paid != t["is_paid"])
+
+    # ──── Existing types NOT found in the policy ────
     missing = [
         {
             "code": c.code,
@@ -1553,25 +1617,26 @@ def extract_types_from_policy(
         "missing_from_policy": missing,
         "warnings": result["warnings"],
         "chunks_used": result["chunks_used"],
-        "note": "Yeh sirf tajweez hai — kuch save nahi hua. Review kar ke apply karein.",
+        "note": "These are suggestions only — nothing has been saved. Review, then apply.",
     }
 
 
 def apply_policy_types(db: Session, company_id: int, extracted: List[dict],
                        disable_missing: bool = True) -> dict:
     """
-    Agent ki nikali hui types ko company ki config par chaspa karo.
+    Apply the types extracted by the agent to the company config.
 
-    Policy document hi asal sach hai — jo type document mein NAHI mili wo
-    **band** kar di jati hai (employee ko dikhti hi nahi). Delete nahi karte:
-    purani requests aur history saabit rehni chahiye, aur CEO ek click mein
-    wapas on kar sakta hai.
+    The policy document is the source of truth — a type NOT found in it is
+    **disabled** (employees stop seeing it). It is never deleted: old
+    requests and history must stay intact, and the CEO can switch it back
+    on with one click.
 
-    Yeh function `settings.py` ke upload background task se bhi chalta hai
-    aur CEO ke manual apply se bhi — dono ka behaviour ek hi rahe.
+    This function runs both from the upload background task in
+    `settings.py` and from the CEO's manual apply — both must behave
+    identically.
     """
     existing = {t.code: t for t in get_leave_types(db, company_id)}
-    applied, created, disabled = [], [], []
+    applied, created, disabled, unpaid = [], [], [], []
     synced = 0
 
     for item in extracted:
@@ -1580,7 +1645,8 @@ def apply_policy_types(db: Session, company_id: int, extracted: List[dict],
             continue
 
         cfg = existing.get(code)
-        if not cfg:
+        is_new = cfg is None
+        if is_new:
             cfg = CompanyLeaveType(
                 company_id=company_id, code=code,
                 sort_order=len(existing) + len(created) + 1,
@@ -1597,6 +1663,31 @@ def apply_policy_types(db: Session, company_id: int, extracted: List[dict],
         cfg.requires_certificate = bool(item.get("requires_certificate"))
         cfg.advance_notice_days = max(0, int(item.get("advance_notice_days") or 0))
         cfg.is_enabled = True
+
+        # ══════ Paid ya unpaid ══════
+        # For the other fields the rule is "the policy document wins".
+        # Here there is one exception, and `None` is the reason:
+        #
+        #   True/False  → the agent read it plainly from the document → apply
+        #   None        → the document is silent (or the agent is)     → ?
+        #
+        # On `None`, new and existing types are treated differently:
+        #   · NEW type → infer from the name (only on plain "unpaid" words),
+        #     otherwise paid. Without this, "Leave Without Pay" silently
+        #     became paid
+        #     and no deduction would ever apply to it — that was the bug.
+        #   · EXISTING type → LEAVE IT ALONE. What the CEO set must not be
+        #     flipped by the agent's silence, or every policy upload would
+        #     wipe out their decision.
+        paid = item.get("is_paid")
+        if isinstance(paid, bool):
+            cfg.is_paid = paid
+        elif is_new:
+            cfg.is_paid = not looks_unpaid(code, cfg.label)
+
+        if not cfg.is_paid:
+            unpaid.append(code)
+
         cfg.source = "policy"
         cfg.policy_reference = item.get("source_quote") or None
         cfg.updated_at = get_pkt_now()
@@ -1604,18 +1695,18 @@ def apply_policy_types(db: Session, company_id: int, extracted: List[dict],
 
     db.flush()
 
-    # ──── Jo policy mein nahi mili — band kar do ────
+    # ──── Anything not found in the policy — disable it ────
     if disable_missing:
         for code, cfg in existing.items():
             if code in applied or not cfg.is_enabled:
                 continue
             cfg.is_enabled = False
             cfg.source = "policy"
-            cfg.policy_reference = "Policy document mein is type ka zikr nahi mila"
+            cfg.policy_reference = "This type was not mentioned in the policy document"
             cfg.updated_at = get_pkt_now()
             disabled.append(code)
 
-    # ──── Employees ke balance bhi config se milao ────
+    # ──── Bring employee balances in line with the config too ────
     for cfg in existing.values():
         synced += sync_balances_to_config(db, company_id, cfg)
 
@@ -1625,6 +1716,9 @@ def apply_policy_types(db: Session, company_id: int, extracted: List[dict],
         "applied": applied,
         "created": created,
         "disabled": disabled,
+        # The unpaid ones — the CEO should see these clearly after an
+        # upload, because these are what payroll will deduct for
+        "unpaid": unpaid,
         "balances_synced": synced,
     }
 
@@ -1636,14 +1730,14 @@ def apply_extracted_types(
     current_user: dict = Depends(require_ceo)
 ):
     """
-    CEO ne jo types confirm kin unhein save karo.
+    Save the types the CEO confirmed.
 
-    `disable_missing` = policy mein jo types nahi mili unki entitlement 0
-    kar do (card dikhta rahega magar apply nahi ho sakegi).
+    `disable_missing` = set the entitlement of types missing from the
+    policy to 0 (the card stays visible but cannot be applied for).
     """
     ceo = get_user_or_404(db, current_user["user_id"])
 
-    # ──── Wahi raasta jo upload ke waqt chalta hai — behaviour ek hi rahe ────
+    # ──── The same path the upload takes — behaviour must not diverge ────
     result = apply_policy_types(
         db, ceo.id,
         [
@@ -1654,6 +1748,7 @@ def apply_extracted_types(
                 "is_unlimited": t.is_unlimited,
                 "requires_certificate": t.requires_certificate,
                 "advance_notice_days": t.advance_notice_days,
+                "is_paid": t.is_paid,
                 "source_quote": t.policy_reference,
             }
             for t in data.types
@@ -1664,11 +1759,16 @@ def apply_extracted_types(
     notes = []
     if result["disabled"]:
         notes.append(
-            f"{', '.join(result['disabled'])} band kar di gayin — "
-            f"policy mein zikr nahi mila"
+            f"{', '.join(result['disabled'])} disabled — "
+            f"not mentioned in the policy"
+        )
+    if result["unpaid"]:
+        notes.append(
+            f"{', '.join(result['unpaid'])} is unpaid — payroll will "
+            f"deduct for those days"
         )
     if result["balances_synced"]:
-        notes.append(f"{result['balances_synced']} employee balance update hue")
+        notes.append(f"{result['balances_synced']} employee balance(s) updated")
 
     return {
         "message": f"{len(result['applied'])} type(s) save ho gayin",
@@ -1687,8 +1787,8 @@ def delete_leave_type(
     current_user: dict = Depends(require_ceo)
 ):
     """
-    Type hatao. Agar us par purani requests maujood hain to delete nahi
-    karte — sirf band kar dete hain, warna history ka matlab hi khatam.
+    Remove a type. If old requests exist against it we do not delete it —
+    only disable it, otherwise the history becomes meaningless.
     """
     ceo = get_user_or_404(db, current_user["user_id"])
     code = (code or "").strip().lower()
@@ -1698,7 +1798,7 @@ def delete_leave_type(
         CompanyLeaveType.code == code
     ).first()
     if not cfg:
-        raise HTTPException(status_code=404, detail="Leave type nahi mili")
+        raise HTTPException(status_code=404, detail="Leave type not found")
 
     used = db.query(LeaveRequest).filter(
         LeaveRequest.company_id == ceo.id,
@@ -1710,11 +1810,11 @@ def delete_leave_type(
         cfg.updated_at = get_pkt_now()
         db.commit()
         return {
-            "message": f"{cfg.label} band kar di gayi",
+            "message": f"{cfg.label} has been disabled",
             "disabled": True,
             "deleted": False,
-            "note": f"{used} purani requests is type par hain — "
-                    f"history bachane ke liye delete nahi ki, sirf band ki hai",
+            "note": f"{used} existing request(s) use this type — it was "
+                    f"disabled rather than deleted, to preserve history",
         }
 
     label = cfg.label
@@ -1726,14 +1826,14 @@ def delete_leave_type(
     db.commit()
 
     return {
-        "message": f"{label} delete ho gayi",
+        "message": f"{label} deleted",
         "disabled": False,
         "deleted": True,
     }
 
 
 # ══════════════════════════════════════════════
-# Route 12: Overdue requests khud approve karo
+# Route 12: Auto-approve overdue requests
 # ══════════════════════════════════════════════
 @router.post("/process-overdue")
 def process_overdue(
@@ -1741,11 +1841,11 @@ def process_overdue(
     current_user: dict = Depends(require_ceo)
 ):
     """
-    Deadline paar kar chuki pending requests nipta do.
+    Settle pending requests that have passed their deadline.
 
-    Waise yeh khud chalta hai jab bhi koi leave listing kholta hai.
-    Yeh endpoint isliye hai ke cron/scheduler se bhi chala sakein —
-    ta ke koi app na khole tab bhi employee latka na rahe.
+    This normally runs by itself whenever someone opens a leave listing.
+    The endpoint exists so a cron/scheduler can drive it too — so nobody
+    is left waiting just because no one opened the app.
     """
     ceo = get_user_or_404(db, current_user["user_id"])
     approved = _auto_approve_overdue(db, ceo.id)
@@ -1766,17 +1866,17 @@ def get_leave_certificate(
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Certificate DB se serve hota hai. Purani requests ki file (jo
-    uploads/certificates/ mein padi hai) bhi abhi chal jayegi.
+    Certificates are served from the DB. Files from older requests (still
+    sitting in uploads/certificates/) also still work.
     """
     leave_req = db.query(LeaveRequest).filter(LeaveRequest.id == leave_id).first()
     if not leave_req:
-        raise HTTPException(status_code=404, detail="Leave request nahi mili")
+        raise HTTPException(status_code=404, detail="Leave request not found")
 
-    # ──── Apna certificate, ya CEO ho to apni company ka ────
+    # ──── Your own certificate, or the CEO's own company's ────
     assert_can_view(db, current_user, leave_req.employee_id)
 
-    # ──── 1. DB (asal jagah) ────
+    # ──── 1. The DB (the real place) ────
     doc = db.query(LeaveDocument).filter(
         LeaveDocument.leave_request_id == leave_id
     ).first()
@@ -1796,4 +1896,4 @@ def get_leave_certificate(
     if path and os.path.exists(path):
         return FileResponse(path, filename=os.path.basename(path))
 
-    raise HTTPException(status_code=404, detail="Certificate available nahi hai")
+    raise HTTPException(status_code=404, detail="Certificate is not available")

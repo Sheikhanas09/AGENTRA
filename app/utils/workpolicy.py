@@ -1,8 +1,8 @@
 """
 Work policy helpers
 ───────────────────
-Attendance aur Leave dono ko yehi hisaab chahiye — ek hi jagah rakha hai
-taake dono modules ka behaviour kabhi alag na ho jaye.
+Attendance and Leave both need this arithmetic — it is kept in one place
+so the two modules can never behave differently.
 """
 
 from datetime import date, timedelta
@@ -10,7 +10,7 @@ from typing import Optional
 
 
 def parse_hhmm(value: str) -> Optional[int]:
-    """'09:00' ya '09:00:00' → aadhi raat se minutes (540)"""
+    """'09:00' or '09:00:00' → minutes since midnight (540)"""
     try:
         parts = str(value).strip().split(":")
         return int(parts[0]) * 60 + int(parts[1])
@@ -26,10 +26,10 @@ def fmt_hhmm(minutes: int) -> str:
 
 def is_overnight_shift(policy) -> bool:
     """
-    Shift aadhi raat paar karti hai? (misal 22:00 se 05:00)
+    Does the shift cross midnight? (e.g. 22:00 to 05:00)
 
-    shift_end < shift_start ho to shift raat bhar chalti hai aur agle
-    calendar din par khatam hoti hai.
+    When shift_end < shift_start the shift runs through the night and ends
+    on the next calendar day.
     """
     if not policy:
         return False
@@ -41,7 +41,7 @@ def is_overnight_shift(policy) -> bool:
 
 
 def shift_length_minutes(policy) -> Optional[int]:
-    """Shift kitni lambi hai — overnight ho to bhi sahi hisaab"""
+    """How long the shift is — correct even when it runs overnight"""
     if not policy:
         return None
     start = parse_hhmm(policy.shift_start)
@@ -53,21 +53,21 @@ def shift_length_minutes(policy) -> Optional[int]:
 
 def work_date_for(policy, now) -> date:
     """
-    Attendance kis DIN ki hai — calendar date nahi, SHIFT ka din.
+    Which DAY the attendance belongs to — the SHIFT's day, not the calendar's.
 
-    ═══ YEH KYUN ZAROORI HAI ═══
-    Normal shift (09:00-18:00) mein dono ek hi hain.
+    ═══ WHY THIS MATTERS ═══
+    On a normal shift (09:00-18:00) the two are the same.
 
-    Magar raat ki shift (22:00-05:00) mein aadhi raat guzarte hi calendar
-    date badal jati hai — jabke banda usi shift mein kaam kar raha hota hai.
-    Pehle isi wajah se employee 12 baje ke baad DOBARA check-in kar leta tha
-    (system usay naya din samajh leta tha), halanke wo abhi tak kal wali
-    shift mein tha.
+    But on a night shift (22:00-05:00) the calendar date changes the moment
+    midnight passes — while the person is still working the same shift.
+    That is why an employee used to be able to check in AGAIN after 12
+    (the system read it as a new day), even though they were still in
+    yesterday's shift.
 
     Ab:
       22:00 Aug 11 pe check-in  ->  work date = Aug 11
-      01:00 Aug 12 (usi shift)  ->  work date = Aug 11  (naya check-in NAHI)
-      06:00 Aug 12 (shift khatam) -> work date = Aug 12 (ab naya din)
+      01:00 Aug 12 (same shift) ->  work date = Aug 11  (NO new check-in)
+      06:00 Aug 12 (shift over)   -> work date = Aug 12 (a new day now)
     """
     today = now.date()
 
@@ -77,8 +77,8 @@ def work_date_for(policy, now) -> date:
     end = parse_hhmm(policy.shift_end)
     now_minutes = now.hour * 60 + now.minute
 
-    # Aadhi raat ke baad magar shift khatam hone se pehle
-    # → yeh abhi bhi PICHHLE din ki shift hai
+    # After midnight but before the shift ends
+    # → this is still the PREVIOUS day's shift
     if now_minutes <= end:
         return today - timedelta(days=1)
 
@@ -86,21 +86,21 @@ def work_date_for(policy, now) -> date:
 
 
 def _allowed_day_names(policy) -> set:
-    """Policy ke working_days ko match-karne layak set mein badlo"""
+    """Turn the policy's working_days into a set that is easy to match"""
     allowed = {str(d).strip().lower() for d in policy.working_days}
-    # "mon" likha ho ya "monday" — dono chalein
+    # Accept both "mon" and "monday"
     allowed |= {d[:3] for d in allowed}
     return allowed
 
 
 def is_working_day(policy, day: date) -> bool:
     """
-    Yeh din working day hai?
+    Is this day a working day?
 
-    Policy na ho ya working_days khali ho → True.
-    Khali list ka matlab "configure nahi kiya" liya jata hai, na ke
-    "koi din working nahi" — warna har din off-day ban jata aur har
-    kaam overtime count hota.
+    No policy, or an empty working_days → True.
+    An empty list is read as "not configured", not as "no day is a
+    working day" — otherwise every day would become an off-day and all
+    work would count as overtime.
     """
     if not policy or not policy.working_days:
         return True
@@ -112,10 +112,10 @@ def is_working_day(policy, day: date) -> bool:
 
 def count_working_days(policy, start: date, end: date) -> int:
     """
-    start se end tak (dono shamil) kitne working days hain.
+    How many working days there are from start to end (both inclusive).
 
-    Leave balance isi se katta hai — Friday se Monday ki chhutti mein
-    Sat/Sun waise hi off hote hain, unka balance kyun kate.
+    The leave balance is deducted from this — in leave from Friday to
+    Monday, Sat/Sun were off anyway, so they should not cost balance.
     """
     if end < start:
         return 0

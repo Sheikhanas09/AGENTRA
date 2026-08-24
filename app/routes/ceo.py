@@ -19,7 +19,7 @@ def require_ceo(current_user: dict = Depends(get_current_user)):
     return current_user
 
 
-# ──── Employee banao ────
+# ──── Create an employee ────
 @router.post("/create-employee")
 def create_employee_route(
     data: EmployeeCreate,
@@ -75,9 +75,9 @@ def get_employees(
     }
 
 
-# ──── Yeh naye add hue ────
+# ──── Newly added ────
 
-# CEO apna profile dekhe
+# The CEO views their own profile
 @router.get("/profile")
 def get_profile(
     db: Session = Depends(get_db),
@@ -94,7 +94,7 @@ def get_profile(
     }
 
 
-# CEO apna profile update kare
+# The CEO updates their own profile
 @router.put("/profile")
 def update_profile(
     data: dict,

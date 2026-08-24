@@ -6,14 +6,18 @@ from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 
+from app.utils.llm import groq_model
+
 load_dotenv()
 
 # ──── LLM Setup ────
 llm = ChatGroq(
     api_key=os.getenv("GROQ_API_KEY"),
-    model="llama-3.1-8b-instant",
+    model=groq_model(),
     temperature=0.9,
-    max_tokens=2000
+    # gpt-oss is a reasoning model — its thinking tokens come out of the
+    # same budget, so this was raised from 2000 (see utils/llm.py)
+    max_tokens=5000
 )
 
 

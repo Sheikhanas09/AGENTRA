@@ -3,6 +3,8 @@ import smtplib
 import os
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.application import MIMEApplication
+import base64
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp import types
@@ -118,6 +120,32 @@ async def list_tools():
                 "required": [
                     "candidate_name", "candidate_email", "job_title",
                     "company_name", "ceo_name", "sender_email", "sender_password"
+                ]
+            }
+        ),
+        types.Tool(
+            name="send_payroll_email",
+            description=(
+                "Email a salary slip PDF to an employee. The PDF arrives "
+                "base64-encoded because MCP carries JSON, not raw bytes."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "employee_name": {"type": "string"},
+                    "employee_email": {"type": "string"},
+                    "period_label": {"type": "string"},
+                    "net_salary": {"type": "string"},
+                    "currency": {"type": "string"},
+                    "company_name": {"type": "string"},
+                    "pdf_base64": {"type": "string"},
+                    "sender_email": {"type": "string"},
+                    "sender_password": {"type": "string"}
+                },
+                "required": [
+                    "employee_name", "employee_email", "period_label",
+                    "net_salary", "company_name", "pdf_base64",
+                    "sender_email", "sender_password"
                 ]
             }
         )
@@ -456,6 +484,67 @@ CEO, {company_name}"""
             smtp_server.quit()
 
             return [types.TextContent(type="text", text=f"Rejection email sent to {candidate_email}")]
+        except Exception as e:
+            return [types.TextContent(type="text", text=f"Email error: {str(e)}")]
+
+    # ──── Tool 6: Salary Slip Email (PDF attachment) ────
+    elif name == "send_payroll_email":
+        employee_name = arguments["employee_name"]
+        employee_email = arguments["employee_email"]
+        period_label = arguments["period_label"]
+        net_salary = arguments["net_salary"]
+        currency = arguments.get("currency", "PKR")
+        company_name = arguments["company_name"]
+        pdf_base64 = arguments["pdf_base64"]
+        sender_email = arguments["sender_email"]
+        sender_password = arguments["sender_password"]
+
+        subject = f"Salary Slip - {period_label}"
+        body = f"""Dear {employee_name},
+
+Please find attached your salary slip for {period_label}.
+
+Net Salary: {currency} {net_salary}
+
+The slip includes a full breakdown of your earnings, deductions and the
+attendance record they were calculated from. If any figure does not look
+right, please contact HR.
+
+This mailbox is not monitored - please write to HR with any questions.
+
+{company_name}
+HR Department"""
+
+        try:
+            # Base64 back to bytes — MCP carries JSON, not raw bytes
+            pdf_bytes = base64.b64decode(pdf_base64)
+
+            msg = MIMEMultipart()
+            msg['From'] = sender_email
+            msg['To'] = employee_email
+            msg['Subject'] = subject
+            msg.attach(MIMEText(body, 'plain'))
+
+            # The slip goes as an attachment — the salary breakdown is not
+            # repeated in the email body, it lives in the PDF
+            part = MIMEApplication(pdf_bytes, _subtype="pdf")
+            safe = "".join(ch for ch in employee_name if ch.isalnum() or ch in " -_").strip()
+            part.add_header(
+                'Content-Disposition', 'attachment',
+                filename=f"salary-slip-{safe.replace(' ', '_')}-{period_label.replace(' ', '-')}.pdf"
+            )
+            msg.attach(part)
+
+            smtp_server = smtplib.SMTP('smtp.gmail.com', 587)
+            smtp_server.starttls()
+            smtp_server.login(sender_email, sender_password)
+            smtp_server.sendmail(sender_email, employee_email, msg.as_string())
+            smtp_server.quit()
+
+            return [types.TextContent(
+                type="text",
+                text=f"Salary slip emailed to {employee_email}"
+            )]
         except Exception as e:
             return [types.TextContent(type="text", text=f"Email error: {str(e)}")]
 

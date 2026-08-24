@@ -1,9 +1,9 @@
 """
 Company + authorization helpers
 ───────────────────────────────
-`company_id` koi alag table nahi — wo CEO ki user id hai.
-Attendance aur Leave dono yehi rules use karte hain taake authorization
-kabhi ek module mein sakht aur doosre mein narm na ho jaye.
+`company_id` is not a separate table — it IS the CEO's user id.
+Attendance and Leave both use these rules, so authorization can never be
+strict in one module and loose in another.
 """
 
 from typing import List, Optional
@@ -17,19 +17,19 @@ from app.utils.security import get_current_user
 
 def require_ceo(current_user: dict = Depends(get_current_user)):
     if current_user["role"] not in ["ceo", "superadmin"]:
-        raise HTTPException(status_code=403, detail="Sirf CEO yeh kar sakta hai")
+        raise HTTPException(status_code=403, detail="Only the CEO can do this")
     return current_user
 
 
 def get_user_or_404(db: Session, user_id: int) -> User:
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
-        raise HTTPException(status_code=404, detail="User nahi mila")
+        raise HTTPException(status_code=404, detail="User not found")
     return user
 
 
 def resolve_company_id(db: Session, user: User) -> Optional[int]:
-    """CEO ka apna id; employee ke liye us ki company ke CEO ka id"""
+    """The CEO's own id; for an employee, their company's CEO id"""
     if user.role == "ceo":
         return user.id
     if not user.company_name:
@@ -41,17 +41,17 @@ def resolve_company_id(db: Session, user: User) -> Optional[int]:
     return ceo.id if ceo else None
 
 
-def assert_self(current_user: dict, employee_id: int, action: str = "yeh kaam"):
-    """Apne liye hi — doosre ke naam pe attendance/leave nahi"""
+def assert_self(current_user: dict, employee_id: int, action: str = "this"):
+    """Only for yourself — no attendance/leave on someone else's behalf"""
     if current_user["user_id"] != employee_id:
         raise HTTPException(
             status_code=403,
-            detail=f"Aap sirf apne liye {action} kar sakte hain"
+            detail=f"You can only do {action} for yourself"
         )
 
 
 def assert_can_view(db: Session, current_user: dict, employee_id: int) -> User:
-    """Apna record, ya CEO ho to apni company ke employee ka record"""
+    """Your own record, or — if you are the CEO — your company's employee"""
     target = get_user_or_404(db, employee_id)
 
     if current_user["user_id"] == employee_id:
@@ -65,11 +65,11 @@ def assert_can_view(db: Session, current_user: dict, employee_id: int) -> User:
         if target.company_name and target.company_name == ceo.company_name:
             return target
 
-    raise HTTPException(status_code=403, detail="Yeh record dekhne ki ijazat nahi")
+    raise HTTPException(status_code=403, detail="You are not allowed to view this record")
 
 
 def company_employees(db: Session, ceo: User) -> List[User]:
-    """CEO ki company ke active employees (fired ko chhod kar)"""
+    """Active employees in the CEO's company (excluding fired ones)"""
     if not ceo.company_name:
         return []
     return db.query(User).filter(

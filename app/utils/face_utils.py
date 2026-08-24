@@ -28,7 +28,7 @@ def get_face_embedding(image) -> list:
         import tempfile
         import os
 
-        # ──── Model download karo ────
+        # ──── Download the model ────
         model_path = os.path.join(
             os.path.dirname(__file__), "face_landmarker.task"
         )
@@ -45,7 +45,7 @@ def get_face_embedding(image) -> list:
             base_options=base_options,
             num_faces=1,
             min_face_detection_confidence=0.3,
-            min_face_presence_confidence=0.3  # ← yeh change karo
+            min_face_presence_confidence=0.3
         )
 
         # ──── PIL → MediaPipe Image ────
@@ -128,7 +128,7 @@ def verify_face(
     live_image_base64: str,
     stored_embedding: list,
     threshold: float = 0.05
-    # ↑ MediaPipe ke saath strict threshold
+    # ↑ A strict threshold for MediaPipe
     # Same person = 0.01-0.04
     # Different person = 0.05+
 ) -> dict:
@@ -139,11 +139,11 @@ def verify_face(
 
     live_embedding = get_face_embedding(image)
     if live_embedding is None:
-        # ──── Face detect nahi hua ────
+        # ──── No face was detected ────
         return {"verified": False, "distance": 1.0, "error": "No face detected"}
 
     if len(live_embedding) != len(stored_embedding):
-        # ──── Old enrollment → Re-enroll karo ────
+        # ──── An old enrolment → re-enrol ────
         return {
             "verified": False,
             "distance": 1.0,
@@ -173,8 +173,8 @@ def enroll_face_from_images(base64_images: list) -> list:
             embeddings.append(embedding)
 
     if not embeddings:
-        # ──── Face detect nahi hua ────
-        # Simple pixel embedding use karo
+        # ──── No face was detected ────
+        # Fall back to a simple pixel embedding
         print("Warning: Using pixel embedding")
         for b64_img in base64_images:
             image = decode_base64_image(b64_img)
@@ -196,14 +196,14 @@ def prepare_photo_for_db(
     max_input_bytes: int = 12 * 1024 * 1024
 ) -> dict:
     """
-    Base64 camera photo → chhota compressed JPEG (DB mein store karne ke liye).
+    Base64 camera photo → a small compressed JPEG (for storing in the DB).
 
-    Browser ka canvas.toDataURL() 1-4 MB ka base64 deta hai. Usay jaisa ka
-    taisa DB mein daalna DB ko phula deta hai, isliye:
-      - lamba side max 640px tak resize (attendance record ke liye kaafi)
+    The browser's canvas.toDataURL() produces 1-4 MB of base64. Storing
+    that untouched bloats the DB, so:
+      - the long side is resized to at most 640px (plenty for a record)
       - JPEG quality 75 pe re-encode
       - result ~30-60 KB
-    sha256 bhi deta hai taake baad mein verify ho sake image badli to nahi.
+    It also returns a sha256, so the image can later be verified unchanged.
 
     Return: {data, mime_type, width, height, size_bytes, sha256} ya None
     """
@@ -215,14 +215,14 @@ def prepare_photo_for_db(
     try:
         raw = base64_str.split(",", 1)[1] if "," in base64_str else base64_str
 
-        # ──── Bohot bara payload pehle hi reject ────
+        # ──── Reject an oversized payload up front ────
         if len(raw) > max_input_bytes:
             print(f"Photo too large: {len(raw)} bytes")
             return None
 
         img = Image.open(io.BytesIO(base64.b64decode(raw)))
 
-        # ──── Transparency/palette wali images JPEG mein nahi jatin ────
+        # ──── Images with transparency/palette cannot go straight to JPEG ────
         if img.mode not in ("RGB", "L"):
             img = img.convert("RGB")
 

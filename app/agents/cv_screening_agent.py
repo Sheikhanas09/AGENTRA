@@ -8,13 +8,17 @@ from langgraph.graph import StateGraph, END
 import chromadb
 from sentence_transformers import SentenceTransformer
 
+from app.utils.llm import groq_model
+
 load_dotenv()
 
 llm = ChatGroq(
     api_key=os.getenv("GROQ_API_KEY"),
-    model="llama-3.1-8b-instant",
+    model=groq_model(),
     temperature=0.3,
-    max_tokens=1500
+    # gpt-oss is a reasoning model — its thinking tokens come out of the
+    # same budget, so this was raised from 1500 (see utils/llm.py)
+    max_tokens=4000
 )
 
 # ──── ChromaDB + Sentence Transformer initialize ────
@@ -24,7 +28,7 @@ chroma_client = chromadb.PersistentClient(
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 
-# ──── RAG: Job Description store karo ────
+# ──── RAG: store the job description ────
 def store_job_in_vectordb(job_id: int, job_title: str, job_description: str, job_skills: str, job_keywords: str):
     collection = chroma_client.get_or_create_collection(name="job_descriptions")
     doc_id = f"job_{job_id}"
@@ -38,7 +42,7 @@ def store_job_in_vectordb(job_id: int, job_title: str, job_description: str, job
 
     embedding = embedding_model.encode(full_job_text).tolist()
 
-    # ──── Already exist karta hai to update karo ────
+    # ──── If it already exists, update it ────
     existing = collection.get(ids=[doc_id])
     if existing["ids"]:
         collection.update(
@@ -56,7 +60,7 @@ def store_job_in_vectordb(job_id: int, job_title: str, job_description: str, job
         )
 
 
-# ──── RAG: CV ko job se match karo ────
+# ──── RAG: match the CV against the job ────
 def get_rag_similarity(job_id: int, cv_text: str) -> float:
     try:
         collection = chroma_client.get_or_create_collection(name="job_descriptions")
@@ -101,7 +105,7 @@ class CVScreeningState(TypedDict):
 
 # ──── Node 1: RAG Similarity Score ────
 def rag_similarity_node(state: CVScreeningState) -> CVScreeningState:
-    # ──── Job description Vector DB mein store karo ────
+    # ──── Store the job description in the vector DB ────
     store_job_in_vectordb(
         job_id=state["job_id"],
         job_title=state["job_title"],
@@ -110,7 +114,7 @@ def rag_similarity_node(state: CVScreeningState) -> CVScreeningState:
         job_keywords=state["job_keywords"]
     )
 
-    # ──── CV ko job se semantically match karo ────
+    # ──── Match the CV to the job semantically ────
     rag_score = get_rag_similarity(
         job_id=state["job_id"],
         cv_text=state["cv_text"]

@@ -64,18 +64,18 @@ class CompanyWorkPolicy(Base):
     shift_end = Column(String, nullable=False)
 
     # ──── Check-in window ────
-    # Check-in sirf shift ke darmiyan ho sakta hai.
+    # Check-in is only possible during the shift.
     # Window: [shift_start - early_checkin_grace_mins  ...  shift_end]
-    # Shift end ke baad check-in block → banda absent rehta hai.
-    # (Checkout pe koi pabandi nahi — der tak kaam kar sakta hai)
+    # Check-in is blocked after the shift ends → that person stays absent.
+    # (No restriction on checkout — they may work as late as they like)
     enforce_shift_window = Column(Boolean, default=True)
     early_checkin_grace_mins = Column(Integer, default=60)
 
-    # ──── Leave: CEO kitne ghante mein jawab de ────
-    # Har leave request CEO ke paas jati hai (us din koi zaroori meeting
-    # ho sakti hai). Itne ghante tak CEO jawab na de aur balance maujood
-    # ho to request khud approve ho jati hai — employee latka na rahe.
-    # 0 = kabhi auto-approve mat karo (hamesha CEO ka intezar)
+    # ──── Leave: how many hours the CEO has to respond ────
+    # Every leave request goes to the CEO (there may be an important
+    # meeting that day). If they do not answer within this many hours and
+    # the balance allows, the request approves itself — nobody is left
+    # hanging. 0 = never auto-approve (always wait for the CEO)
     leave_auto_approve_hours = Column(Integer, default=24)
 
     min_daily_hours = Column(Float, default=8.0)
@@ -83,16 +83,16 @@ class CompanyWorkPolicy(Base):
     max_overtime_per_day = Column(Float, default=3.0)
 
     # ──── Break ────
-    # `break_policy` sirf yeh batata tha ke break net hours se katega ya
-    # nahi — magar employee ko yeh maloom hi nahi hota tha ke break KAB
-    # hai aur KITNI der ki hai. Ab teenon baatein alag alag rakhi hain:
+    # `break_policy` only said whether the break comes off the net hours —
+    # but the employee never learned WHEN the break is or HOW LONG it
+    # lasts. All three facts are now kept separately:
     #
-    #   break_policy   → katega ya nahi (excluded / included)
-    #   break_minutes  → kitni der ki ijazat hai
-    #   break_start/end→ agar waqt muqarrar hai (misal 01:00 PM – 02:00 PM)
+    #   break_policy   → deducted or not (excluded / included)
+    #   break_minutes  → how long is allowed
+    #   break_start/end→ if the time is fixed (e.g. 01:00 PM – 02:00 PM)
     #
-    # Start/end khali chhor dein to matlab: "itne minute, jab chahein"
-    # (flexible break). Dono soorton mein `break_minutes` hi hadd hai.
+    # Leaving start/end empty means: "this many minutes, whenever you
+    # like" (a flexible break). Either way `break_minutes` is the limit.
     break_policy = Column(Enum(BreakPolicyEnum), default=BreakPolicyEnum.excluded)
     break_minutes = Column(Integer, default=60)
     break_start = Column(String, nullable=True)
@@ -156,7 +156,7 @@ class AttendanceSession(Base):
     # ──── Location Verified ────
     location_verified = Column(Boolean, default=False)
     checkout_location_verified = Column(Boolean, default=False)
-    # ↑ GPS office range mein hai?
+    # ↑ Is the GPS reading inside the office range?
 
     # ──── GPS Audit (distance + browser accuracy) ────
     check_in_distance_meters = Column(Float, nullable=True)
@@ -184,14 +184,14 @@ class AttendanceSession(Base):
     is_overtime = Column(Boolean, default=False)
     overtime_minutes = Column(Integer, default=0)
 
-    # ──── Shift end se pehle nikal gaya? (policy.shift_end) ────
+    # ──── Did they leave before the shift ended? (policy.shift_end) ────
     is_early_checkout = Column(Boolean, default=False)
     early_checkout_minutes = Column(Integer, default=0)
 
     # ──── Policy Snapshot ────
     policy_snapshot = Column(JSON, nullable=True)
 
-    # ──── Working day? (policy ke working_days se) ────
+    # ──── A working day? (from the policy's working_days) ────
     is_working_day = Column(Boolean, default=True)
 
     status = Column(Enum(AttendanceStatusEnum), default=AttendanceStatusEnum.checked_in)
@@ -219,21 +219,21 @@ class AttendanceInterval(Base):
     session = relationship("AttendanceSession", back_populates="intervals")
 
 
-# ──── Table 5b: Attendance Photos (DB mein binary) ────
-# Pehle photos sirf uploads/faces/ folder mein padi rehti thin aur DB mein
-# sirf path save hota tha — file delete/move ho jaye to record khali.
-# Ab actual bytes DB mein hain (backup ke saath chali jaati hain).
+# ──── Table 5b: Attendance Photos (binary, in the DB) ────
+# Photos used to sit only in the uploads/faces/ folder with just a path in
+# the DB — delete or move the file and the record was empty.
+# The actual bytes now live in the DB (and travel with the backup).
 #
-# ALAG table kyun (attendance_sessions mein column q nahi)?
-# Dashboard har baar poori team ki sessions SELECT karta hai — agar image
-# bytes usi row mein hote to har listing ke saath megabytes uthte.
-# Alag table = listing fast, photo sirf tab load hoti hai jab maangi jaye.
+# Why a SEPARATE table (and not a column on attendance_sessions)?
+# The dashboard SELECTs the whole team's sessions on every refresh — with
+# the image bytes in that row, every listing would drag megabytes along.
+# A separate table = fast listings, and the photo loads only when asked for.
 class AttendancePhoto(Base):
     __tablename__ = "attendance_photos"
 
     id = Column(Integer, primary_key=True, index=True)
 
-    # ──── Enrollment photo ka koi session nahi hota → nullable ────
+    # ──── An enrolment photo has no session → nullable ────
     session_id = Column(
         Integer,
         ForeignKey("attendance_sessions.id", ondelete="CASCADE"),
@@ -244,7 +244,7 @@ class AttendancePhoto(Base):
 
     kind = Column(Enum(PhotoKindEnum), nullable=False)
 
-    # ──── Asal image (compressed JPEG) ────
+    # ──── The actual image (compressed JPEG) ────
     image_data = Column(LargeBinary, nullable=False)
     mime_type = Column(String, default="image/jpeg")
 
@@ -257,7 +257,7 @@ class AttendancePhoto(Base):
     captured_at = Column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (
-        # ──── Ek session ki ek hi check-in aur ek hi check-out photo ────
+        # ──── One check-in and one check-out photo per session ────
         UniqueConstraint("session_id", "kind", name="uq_photo_session_kind"),
         Index("ix_photo_session_kind", "session_id", "kind"),
         Index("ix_photo_employee_kind", "employee_id", "kind"),
@@ -265,14 +265,14 @@ class AttendancePhoto(Base):
 
 
 # ──── Table 5c: Company Leave Types ────
-# Har company ki apni leave types hoti hain. Pehle 5 types code mein
-# hardcoded thin (annual/casual/sick/unpaid/emergency) — magar kisi company
-# ki policy mein "casual" hai hi nahi, aur kisi ke paas "maternity" ya
-# "study leave" bhi hai. Ab types DB se aati hain.
+# Every company has its own leave types. Five types used to be hardcoded
+# (annual/casual/sick/unpaid/emergency) — but some companies have no
+# "casual" at all, and others also have "maternity" or "study leave".
+# The types now come from the DB.
 #
-# Jo type policy document mein na ho uska entitlement 0 rakha jata hai —
-# card phir bhi dikhta hai (0/0) taake employee ko pata chale ke maujood
-# to hai magar allowed nahi.
+# A type missing from the policy document gets an entitlement of 0 — the
+# card still shows (0/0) so the employee can see it exists but is not
+# allowed.
 class CompanyLeaveType(Base):
     __tablename__ = "company_leave_types"
 
@@ -283,23 +283,35 @@ class CompanyLeaveType(Base):
     label = Column(String, nullable=False)         # "Annual Leave"
 
     default_entitlement = Column(Integer, default=0)
-    is_unlimited = Column(Boolean, default=False)  # unpaid jaisi
+    is_unlimited = Column(Boolean, default=False)  # like unpaid leave
 
-    # ──── Is type ke apne rules ────
+    # ──── Is this leave paid? ────
+    # This is the one question payroll has to ask. The system used to guess
+    # from the CODE alone (anything named "unpaid" is unpaid) — but a type
+    # coming from a policy document can be named anything
+    # ("leave without pay", "sabbatical").
+    #
+    # Stored on the TYPE, not on the request — because this is a company
+    # rule, not a per-request decision. And if the CEO changes the rule
+    # later, old slips are unaffected: each payslip keeps its own
+    # `attendance_snapshot`.
+    is_paid = Column(Boolean, default=True, nullable=False)
+
+    # ──── This type's own rules ────
     requires_certificate = Column(Boolean, default=False)
     advance_notice_days = Column(Integer, default=1)
-    # ↑ 0 = usi din apply ho sakti hai (sick/emergency)
+    # ↑ 0 = can be applied for the same day (sick/emergency)
 
     is_enabled = Column(Boolean, default=True)
-    # ↑ False = employee ko dikhti hi nahi
+    # ↑ False = the employee never sees it
 
     source = Column(String, default="default")
     # ↑ default = system ne banayi
-    #   policy  = policy document se nikli
-    #   manual  = CEO ne khud banayi
+    #   policy  = extracted from the policy document
+    #   manual  = created by the CEO
 
     policy_reference = Column(Text, nullable=True)
-    # ↑ Document ki kaunsi line se aayi — CEO verify kar sake
+    # ↑ Which line of the document it came from — so the CEO can verify
 
     sort_order = Column(Integer, default=0)
 
@@ -320,19 +332,19 @@ class LeaveRequest(Base):
     employee_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     company_id = Column(Integer, nullable=False)
     leave_type = Column(String, nullable=False)
-    # ↑ Enum se String kiya — company apni policy mein koi bhi leave type
-    #   rakh sakti hai (maternity, study, hajj...). Fixed enum us raah
-    #   mein rukawat tha. Chalne wale types company_leave_types mein hain.
+    # ↑ Changed from Enum to String — a company may have any leave type in
+    #   its policy (maternity, study, hajj...). A fixed enum stood in the
+    #   way. The valid types live in company_leave_types.
     start_date = Column(Date, nullable=False)
     end_date = Column(Date, nullable=False)
 
     total_days = Column(Integer, nullable=False)
-    # ↑ Calendar days (start se end tak, dono shamil) — sirf dikhane ke liye
+    # ↑ Calendar days (start to end, both inclusive) — for display only
 
     deductible_days = Column(Integer, nullable=True)
-    # ↑ In mein se kitne WORKING days hain — balance sirf yeh katta hai.
-    #   Friday se Monday ki chhutti mein Sat/Sun waise hi off hote hain,
-    #   unka balance kaatna galat hai.
+    # ↑ How many of those are WORKING days — only these come off the
+    #   balance. In leave from Friday to Monday, Sat/Sun were off anyway,
+    #   so charging balance for them would be wrong.
 
     reason = Column(Text, nullable=True)
     medical_certificate = Column(String, nullable=True)
@@ -344,19 +356,19 @@ class LeaveRequest(Base):
     payroll_notified = Column(Boolean, default=False)
 
     reminder_sent_at = Column(DateTime, nullable=True)
-    # ↑ CEO ko deadline ki yaad dihani kab bheji — warna scheduler har
-    #   15 minute par wahi reminder dobara bhejta rehta
+    # ↑ When the deadline reminder was sent to the CEO — otherwise the
+    #   scheduler would resend the same reminder every 15 minutes
 
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
-# ──── Table 6b: Leave Documents (DB mein binary) ────
-# Medical certificate pehle uploads/certificates/ mein file bana kar
-# path DB mein rakhta tha — aur CEO usay kahin se dekh hi nahi sakta tha.
-# Ab bytes DB mein hain (attendance_photos jaisa hi tareeqa).
+# ──── Table 6b: Leave Documents (binary, in the DB) ────
+# A medical certificate used to be written into uploads/certificates/ with
+# only the path in the DB — and the CEO had no way to view it at all.
+# The bytes now live in the DB (the same approach as attendance_photos).
 #
-# Alag table isliye ke leave list har baar poori requests SELECT karti hai —
-# agar bytes usi row mein hote to har listing megabytes uthati.
+# A separate table because the leave list SELECTs every request each time —
+# with the bytes in that row, every listing would drag megabytes along.
 class LeaveDocument(Base):
     __tablename__ = "leave_documents"
 
@@ -372,7 +384,7 @@ class LeaveDocument(Base):
 
     doc_type = Column(String, default="medical_certificate")
 
-    # ──── Asal file (image compressed, PDF jaisi ki taisi) ────
+    # ──── The actual file (images compressed, PDFs untouched) ────
     file_data = Column(LargeBinary, nullable=False)
     file_name = Column(String, nullable=True)
     mime_type = Column(String, default="application/pdf")
@@ -399,9 +411,9 @@ class LeaveBalance(Base):
     company_id = Column(Integer, nullable=False)
     year = Column(Integer, nullable=False)
     leave_type = Column(String, nullable=False)
-    # ↑ Enum se String kiya — company apni policy mein koi bhi leave type
-    #   rakh sakti hai (maternity, study, hajj...). Fixed enum us raah
-    #   mein rukawat tha. Chalne wale types company_leave_types mein hain.
+    # ↑ Changed from Enum to String — a company may have any leave type in
+    #   its policy (maternity, study, hajj...). A fixed enum stood in the
+    #   way. The valid types live in company_leave_types.
     total_entitlement = Column(Integer, default=0)
     used_days = Column(Integer, default=0)
     remaining_days = Column(Integer, default=0)
@@ -432,9 +444,9 @@ class CompanyPolicyOverride(Base):
     id = Column(Integer, primary_key=True, index=True)
     company_id = Column(Integer, nullable=False)
     leave_type = Column(String, nullable=False)
-    # ↑ Enum se String kiya — company apni policy mein koi bhi leave type
-    #   rakh sakti hai (maternity, study, hajj...). Fixed enum us raah
-    #   mein rukawat tha. Chalne wale types company_leave_types mein hain.
+    # ↑ Changed from Enum to String — a company may have any leave type in
+    #   its policy (maternity, study, hajj...). A fixed enum stood in the
+    #   way. The valid types live in company_leave_types.
     force_manual = Column(Boolean, default=False)
     reason = Column(Text, nullable=True)
     set_by = Column(Integer, ForeignKey("users.id"), nullable=True)
@@ -443,8 +455,8 @@ class CompanyPolicyOverride(Base):
 
 
 # ──── Table 10: Office Location ────
-# ↑ Modular — CEO change kar sakta hai
-# Ek company ki ek office location
+# ↑ Modular — the CEO can change it
+# One office location per company
 class OfficeLocation(Base):
     __tablename__ = "office_locations"
 
@@ -459,9 +471,9 @@ class OfficeLocation(Base):
     # ↑ GPS coordinates
 
     radius_meters = Column(Integer, default=200)
-    # ↑ Kitne meters andar valid
+    # ↑ Valid within this many metres
     # 200m = default
-    # CEO change kar sakta hai settings se
+    # The CEO can change this from Settings
 
     is_active = Column(Boolean, default=True)
 

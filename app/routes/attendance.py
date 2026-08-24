@@ -42,7 +42,7 @@ router = APIRouter(prefix="/attendance", tags=["Attendance"])
 
 
 def _work_policy(db: Session, company_id: Optional[int]):
-    """Company ki work policy — company_id na ho to None"""
+    """The company work policy — None when there is no company_id"""
     if not company_id:
         return None
     return db.query(CompanyWorkPolicy).filter(
@@ -52,25 +52,25 @@ def _work_policy(db: Session, company_id: Optional[int]):
 
 def _work_date(db: Session, company_id: Optional[int], now: Optional[datetime] = None):
     """
-    Is company ka abhi ka ATTENDANCE DIN.
+    This company's current ATTENDANCE DAY.
 
-    Raat ki shift mein aadhi raat ke baad bhi din wahi rehta hai jis din
-    shift shuru hui thi — warna employee 12 baje ke baad dobara check-in
-    kar leta tha.
+    On a night shift the day stays the one the shift STARTED on, even
+    after midnight — otherwise an employee could check in again past 12
+    could check in again.
     """
     now = now or get_pkt_now()
     return work_date_for(_work_policy(db, company_id), now)
 
 
 def _employee_work_date(db: Session, employee_id: int):
-    """Employee ki company ke hisaab se abhi ka attendance din"""
+    """The current attendance day for this employee's company"""
     employee = db.query(User).filter(User.id == employee_id).first()
     company_id = _resolve_company_id(db, employee) if employee else None
     return _work_date(db, company_id or employee_id)
 
 
 def _assert_self(current_user: dict, employee_id: int):
-    """Check-in/out/pause/resume sirf apne liye"""
+    """Check-in/out/pause/resume — only for yourself"""
     _assert_self_base(current_user, employee_id, "attendance mark")
 
 
@@ -78,15 +78,15 @@ def _assert_self(current_user: dict, employee_id: int):
 # GPS helpers
 # ══════════════════════════════════════════════
 
-# Browser GPS accuracy ka max allowance jo hum radius mein add karte hain
+# The maximum browser GPS accuracy we are willing to add to the radius
 MAX_ACCURACY_ALLOWANCE_M = 250
 
-# Isse zyada accuracy value = reading bharosay ke qabil nahi
+# An accuracy value worse than this means the reading cannot be trusted
 UNRELIABLE_ACCURACY_M = 2000
 
 
 def _calculate_distance(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
-    """Haversine formula — 2 GPS points ka distance meters mein"""
+    """Haversine formula — distance between two GPS points, in metres"""
     R = 6371000
     lat1_r = math.radians(lat1)
     lat2_r = math.radians(lat2)
@@ -102,13 +102,13 @@ def _verify_location(office, lat, lng, accuracy) -> dict:
     """
     Accuracy-weighted GPS verification.
 
-    Masla tha: same jagah pe check-in 15m aur check-out 20098m dikhata tha.
-    Wajah — browser kabhi GPS chip use karta hai (accuracy ~10m) aur kabhi
-    WiFi/IP se andaza lagata hai (accuracy hazaron meters).
+    The problem: from the same spot, check-in showed 15m and check-out
+    20098m. The cause — the browser sometimes uses the GPS chip (accuracy
+    ~10m) and sometimes estimates from WiFi/IP (accuracy thousands of m).
 
-    Fix: reading ki apni accuracy ko radius mein add karo, aur agar reading
-    itni kharab ho ke kuch keh hi nahi sakte to verify skip kar do —
-    employee ko galat "outside office" flag na lage.
+    Fix: add the reading's own accuracy to the radius, and if a reading is
+    so poor that nothing can be said, skip verification — an employee
+    should never get a wrong "outside office" flag.
     """
     result = {
         "verified": False,
@@ -118,42 +118,42 @@ def _verify_location(office, lat, lng, accuracy) -> dict:
         "message": "",
     }
 
-    # ──── Office set hi nahi → verification skip ────
+    # ──── No office is set → skip verification ────
     if not office:
         result["verified"] = True
         result["note"] = "office_not_set"
-        result["message"] = "Office location set nahi hai — verification skip"
+        result["message"] = "No office location is set — verification skipped"
         return result
 
-    # ──── GPS mila hi nahi (permission deny / timeout) ────
+    # ──── No GPS at all (permission denied / timeout) ────
     if lat is None or lng is None:
         result["verified"] = False
         result["note"] = "gps_unavailable"
-        result["message"] = "GPS location nahi mili"
+        result["message"] = "No GPS location was available"
         return result
 
     distance = _calculate_distance(lat, lng, office.latitude, office.longitude)
     result["distance"] = round(distance, 1)
 
-    # ──── Reading itni kharab ke judge nahi kar sakte ────
+    # ──── The reading is too poor to judge ────
     if accuracy and accuracy > UNRELIABLE_ACCURACY_M:
         result["verified"] = True
         result["note"] = "gps_unreliable"
         result["message"] = (
-            f"GPS accuracy bohot kam ({int(accuracy)}m) — verification skip"
+            f"GPS accuracy is too poor ({int(accuracy)}m) — verification skipped"
         )
         return result
 
-    # ──── Accuracy ko radius mein allowance ke tor pe add karo ────
+    # ──── Add the accuracy to the radius as an allowance ────
     allowance = min(accuracy or 0, MAX_ACCURACY_ALLOWANCE_M)
     tolerance = office.radius_meters + allowance
 
     result["verified"] = distance <= tolerance
     result["note"] = "in_range" if result["verified"] else "out_of_range"
     result["message"] = (
-        f"Office se {distance:.0f}m (allowed {tolerance:.0f}m)"
+        f"{distance:.0f}m from the office (allowed {tolerance:.0f}m)"
         if result["verified"] else
-        f"Office se bahar — {distance:.0f}m (allowed {tolerance:.0f}m)"
+        f"Outside the office — {distance:.0f}m (allowed {tolerance:.0f}m)"
     )
     return result
 
@@ -163,29 +163,29 @@ def _verify_location(office, lat, lng, accuracy) -> dict:
 # ══════════════════════════════════════════════
 def _in_time_window(now_m: int, start_m: int, end_m: int) -> bool:
     """
-    now_m window ke andar hai? Aadhi raat ko wrap karne wali window bhi
-    handle hoti hai (misal 22:00 se 06:00 wali night shift).
+    Is now_m inside the window? Windows that wrap past midnight are
+    handled too (e.g. a 22:00 to 06:00 night shift).
     """
     if start_m <= end_m:
         return start_m <= now_m <= end_m
     return now_m >= start_m or now_m <= end_m
 
 
-# Grace itni bari na ho ke window ka matlab hi khatam ho jaye
+# The grace must not be so large that the window loses all meaning
 MAX_EARLY_GRACE_MINS = 12 * 60
 
 
 def _checkin_window(policy, day: date, now: datetime) -> dict:
     """
-    Check-in ki ijazat hai ya nahi.
+    Whether checking in is allowed.
 
-    Rule: check-in sirf shift ke darmiyan.
+    Rule: check in only during the shift.
       window = [shift_start - grace  ...  shift_end]
-    Shift end ke baad check-in NAHI hota → banda us din absent rehta hai.
-    (Check-out pe koi pabandi nahi — jitna der tak marzi kaam kare)
+    After the shift ends there is NO check-in → that person is absent for
+    the day. (There is no restriction on check-out — work as long as you like.)
 
-    Non-working day pe koi shift hi nahi hoti, isliye window apply nahi hota
-    (weekend overtime possible rahe).
+    A non-working day has no shift at all, so the window does not apply
+    (so weekend overtime stays possible).
     """
     result = {
         "enforced": False,
@@ -202,7 +202,7 @@ def _checkin_window(policy, day: date, now: datetime) -> dict:
 
     if not _is_working_day(policy, day):
         result["reason"] = "non_working_day"
-        result["message"] = "Aaj working day nahi — check-in window apply nahi hota"
+        result["message"] = "Today is not a working day — the check-in window does not apply"
         return result
 
     start_m = _parse_hhmm(policy.shift_start)
@@ -225,19 +225,19 @@ def _checkin_window(policy, day: date, now: datetime) -> dict:
         result["message"] = f"Check-in window {result['opens_at']} – {result['closes_at']}"
 
     elif opens_m <= end_m and now_m > end_m:
-        # ──── Seedhi window, shift khatam ho chuki ────
+        # ──── A straightforward window, and the shift is over ────
         result["reason"] = "shift_ended"
         result["message"] = (
-            f"Shift {policy.shift_start} – {policy.shift_end} thi. "
-            f"Ab {_fmt_hhmm(now_m)} ho chuke hain — check-in window band ho chuka hai. "
+            f"The shift was {policy.shift_start} – {policy.shift_end}. "
+            f"It is now {_fmt_hhmm(now_m)} — the check-in window has closed. "
             f"Aaj absent mark hoga."
         )
 
     else:
-        # ──── Window abhi khula nahi (ya night shift ka gap chal raha hai) ────
+        # ──── The window has not opened yet (or we are in a night-shift gap) ────
         result["reason"] = "too_early"
         result["message"] = (
-            f"Check-in {result['opens_at']} se khulega "
+            f"Check-in opens at {result['opens_at']} "
             f"(shift {policy.shift_start} – {policy.shift_end})."
         )
 
@@ -254,10 +254,10 @@ def _store_photo(
     captured_at: Optional[datetime] = None,
 ) -> bool:
     """
-    Photo DB mein save karo (compress kar ke).
+    Save the photo in the DB (compressed).
 
-    Photo save fail ho to attendance NAHI ruknI chahiye — attendance
-    ka asal record time + GPS hai, photo sirf evidence hai.
+    A failed photo save must NOT stop attendance — the real attendance
+    record is the time plus GPS; the photo is only evidence.
     """
     if not base64_image:
         return False
@@ -268,7 +268,7 @@ def _store_photo(
         return False
 
     try:
-        # ──── Pehle se hai to replace karo (unique session_id+kind) ────
+        # ──── Replace it if one already exists (unique session_id+kind) ────
         existing = None
         if session_id:
             existing = db.query(AttendancePhoto).filter(
@@ -310,8 +310,8 @@ def _store_photo(
 
 def _photo_kinds_for(db: Session, session_ids: List[int]) -> dict:
     """
-    Kis session ki kaunsi photos hain — ek hi query mein (N+1 se bachne ke liye).
-    image_data column deliberately load NAHI karte, sirf kind.
+    Which sessions have which photos — in one query (to avoid N+1).
+    The image_data column is deliberately NOT loaded, only the kind.
     Return: {session_id: {"checkin", "checkout"}}
     """
     if not session_ids:
@@ -336,12 +336,13 @@ def _open_session(
     status: Optional[AttendanceStatusEnum] = None,
 ) -> Optional[AttendanceSession]:
     """
-    Employee ka abhi khula hua session.
+    The employee's currently open session.
 
-    Sirf aaj ki date nahi dekhte — raat ko kaam karne wale ka session KAL
-    ki date pe hota hai. Misal: 4 baje shaam check-in, raat 1 baje check-out
-    (tab tak PKT date badal chuki hoti hai). Pehle aisa banda check-out hi
-    nahi kar pata tha aur session hamesha ke liye khula reh jata tha.
+    We do not look at today's date alone — someone working through the
+    night has a session dated YESTERDAY. For example: check in at 4pm,
+    check out at 1am (by which point the PKT date has changed). Such a
+    person previously could not check out at all and the session stayed
+    open forever.
     """
     query = db.query(AttendanceSession).filter(
         AttendanceSession.employee_id == employee_id,
@@ -355,7 +356,7 @@ def _open_session(
 
 
 def _on_approved_leave(db: Session, employee_id: int, day: date) -> Optional[LeaveRequest]:
-    """Is din employee ki approved leave hai?"""
+    """Does the employee have approved leave on this day?"""
     return db.query(LeaveRequest).filter(
         LeaveRequest.employee_id == employee_id,
         LeaveRequest.status == LeaveStatusEnum.approved,
@@ -416,10 +417,10 @@ def _session_out(
     photo_kinds: Optional[set] = None,
 ) -> dict:
     """
-    Ek jaisa shape har jagah — frontend ko guess na karna pade.
+    The same shape everywhere — the frontend should never have to guess.
 
-    photo_kinds = is session ki available photos ({"checkin","checkout"}).
-    None ho to purane file-path columns pe fall back karte hain (legacy rows).
+    photo_kinds = the photos available for this session ({"checkin","checkout"}).
+    When None we fall back to the old file-path columns (legacy rows).
     """
     if photo_kinds is None:
         has_in = bool(s.check_in_face_image)
@@ -480,18 +481,18 @@ def _session_out(
 
 def _policy_view(policy, window: dict) -> Optional[dict]:
     """
-    Employee ko dikhane wali policy — poori aur tayyar.
+    The policy as shown to the employee — complete and ready to display.
 
-    ═══ YEH ALAG FUNCTION KYUN ═══
-    Employee ko sirf shift ka waqt nahi, poora qanoon maloom hona chahiye:
-    break kab aur kitni der, kitna pehle check-in ho sakta hai, kitni der
-    baad late lagega, overtime kab shuru hoga. Pehle yeh sab sirf CEO ke
-    Settings mein tha — employee ko kabhi bataya hi nahi gaya.
+    ═══ WHY THIS IS A SEPARATE FUNCTION ═══
+    An employee should know the whole rulebook, not just the shift times:
+    when the break is and how long, how early they can check in, after how
+    long they count as late, when overtime starts. All of this used to live
+    only in the CEO's Settings — the employee was never told.
 
-    Hisaab yahan hota hai, UI mein nahi. `late_after` (shift start +
-    tolerance) jaisi cheez UI ko khud nahi jorni chahiye — warna wohi
-    purani ghalti dobara hogi jahan UI apna hisaab lagata tha aur server
-    se alag ho jata tha.
+    The arithmetic happens here, not in the UI. The UI must not work out
+    something like `late_after` (shift start + tolerance) for itself — that
+    would repeat the old mistake where the UI computed its own figures and
+    drifted away from the server.
     """
     if not policy:
         return None
@@ -499,14 +500,14 @@ def _policy_view(policy, window: dict) -> Optional[dict]:
     start_m = _parse_hhmm(policy.shift_start)
     tolerance = policy.late_tolerance_mins or 0
 
-    # ──── Break muqarrar waqt par hai ya jab chahein? ────
+    # ──── Is the break at a fixed time, or whenever you like? ────
     b_start = _parse_hhmm(policy.break_start) if policy.break_start else None
     b_end = _parse_hhmm(policy.break_end) if policy.break_end else None
     fixed_break = b_start is not None and b_end is not None
 
     if fixed_break:
-        # Waqt diya hai to muddat usi se nikalti hai — do jagah rakhi
-        # hui muddat kabhi na kabhi ek dusre se alag ho jati hai
+        # If times are given, the duration is derived from them — a
+        # duration stored in two places will drift apart eventually
         span = (b_end - b_start) if b_end >= b_start else (24 * 60 - b_start + b_end)
     else:
         span = policy.break_minutes
@@ -519,7 +520,7 @@ def _policy_view(policy, window: dict) -> Optional[dict]:
         "is_overnight": is_overnight_shift(policy),
         "shift_length_minutes": shift_length_minutes(policy),
 
-        # ──── Check-in ki hadd ────
+        # ──── The check-in limits ────
         "enforce_shift_window": policy.enforce_shift_window,
         "early_checkin_grace_mins": policy.early_checkin_grace_mins,
         "checkin_opens_at": window.get("opens_at"),
@@ -527,7 +528,7 @@ def _policy_view(policy, window: dict) -> Optional[dict]:
 
         # ──── Late ────
         "late_tolerance_mins": tolerance,
-        # Is waqt ke BAAD aana late hai — employee ko khud jorna na pare
+        # Arriving AFTER this is late — the employee should not have to work it out
         "late_after": _fmt_hhmm(start_m + tolerance) if start_m is not None else None,
 
         # ──── Break ────
@@ -537,7 +538,7 @@ def _policy_view(policy, window: dict) -> Optional[dict]:
         "break_end": policy.break_end if fixed_break else None,
         "break_is_fixed": fixed_break,
 
-        # ──── Ghante ────
+        # ──── Hours ────
         "min_daily_hours": policy.min_daily_hours,
         "overtime_threshold": policy.overtime_threshold,
         "max_overtime_per_day": policy.max_overtime_per_day,
@@ -547,66 +548,67 @@ def _policy_view(policy, window: dict) -> Optional[dict]:
 def _no_session_status(policy, day: date, now: datetime, window: dict,
                        current_work_date: date) -> tuple:
     """
-    Jis employee ka session nahi bana — wo ABSENT hai, ya abhi aana baqi hai?
+    An employee with no session — are they ABSENT, or still due to arrive?
 
-    ═══ MASLA KYA THA ═══
-    Pehle session na hone par seedha "Absent" likh dete the. Yani subah
-    9 baje shift shuru hone se pehle hi poori team absent dikhti thi, aur
-    raat ki shift mein to shift shuru hone se ghante pehle hi.
+    ═══ WHAT THE PROBLEM WAS ═══
+    A missing session used to be written straight down as "Absent". Which
+    meant the whole team showed as absent before the 9am shift had even
+    started — and on a night shift, hours before it started.
 
-    ═══ SAHI USOOL ═══
-    Absent wahi hai jo check-in ka MAUQA guzar jane ke baad bhi nahi aaya —
-    yani jab check-in window band ho chuka ho (wahi lamha jab employee ka
-    check-in button disable hota hai). Us se pehle wo sirf "abhi nahi aaya".
+    ═══ THE CORRECT RULE ═══
+    Absent means someone who has not arrived even after their CHANCE to
+    check in has passed — that is, once the check-in window has closed (the
+    same moment the employee's check-in button disables). Before that they
+    are simply "not in yet".
 
-    Day shift ho ya night, dono par yehi hisaab lagta hai kyunki window
-    khud shift se banta hai.
+    The same reasoning covers both day and night shifts, because the window
+    is itself derived from the shift.
 
     Return: (status, note)
     """
-    # ──── Guzra hua din — mauqa yaqeenan khatam ────
+    # ──── A past day — the chance is definitely gone ────
     if day < current_work_date:
         return "Absent", None
 
-    # ──── Aane wala din ────
+    # ──── A future day ────
     if day > current_work_date:
-        return "Upcoming", "Yeh din abhi aaya nahi"
+        return "Upcoming", "This day has not arrived yet"
 
-    # ═══ Aaj ka din ═══
+    # ═══ Today ═══
     if window.get("enforced"):
         reason = window.get("reason")
         if reason == "too_early":
             return "Upcoming", window.get("message")
         if window.get("open"):
-            return "Not Checked In", "Check-in window abhi khula hai"
-        # shift_ended — mauqa guzar gaya
+            return "Not Checked In", "The check-in window is still open"
+        # shift_ended — the chance has passed
         return "Absent", "Check-in window band ho chuka"
 
-    # ──── Window enforce nahi — shift end hi hadd hai ────
+    # ──── The window is not enforced — the shift end is the limit ────
     end_m = _parse_hhmm(policy.shift_end) if policy else None
     if end_m is None:
-        # Policy hi nahi — kisi ko absent kehna jaldbazi hogi
+        # There is no policy — calling anyone absent would be premature
         return "Not Checked In", None
 
     now_m = now.hour * 60 + now.minute
     start_m = _parse_hhmm(policy.shift_start)
 
     if start_m is not None and end_m < start_m:
-        # ──── Raat ki shift ────
-        # Is work date ki shift kabhi "guzar" nahi sakti: jaise hi wo
-        # khatam hoti hai, work date khud agle din par chala jata hai.
-        # To ya wo abhi aani hai (do shifton ke darmiyan ka gap), ya chal rahi hai.
+        # ──── Night shift ────
+        # This work date's shift can never "pass": the moment it ends, the
+        # work date moves on to the next day by itself. So the shift is
+        # either still to come (the gap between two shifts), or running.
         if end_m < now_m < start_m:
-            return "Upcoming", "Shift raat ko shuru hogi"
+            return "Upcoming", "The shift starts tonight"
         return "Not Checked In", None
 
     if now_m > end_m:
-        return "Absent", "Shift khatam ho chuki"
+        return "Absent", "The shift is over"
     return "Not Checked In", None
 
 
 def _absent_row(employee: User, day: date, working_day: bool) -> dict:
-    """Jis employee ne check-in hi nahi kiya — same shape, saari values khali"""
+    """An employee who never checked in — same shape, all values empty"""
     return {
         "session_id": None,
         "employee_id": employee.id,
@@ -668,11 +670,11 @@ def enroll_face(
     _assert_can_view(db, current_user, data.employee_id)
 
     if not data.face_images:
-        raise HTTPException(status_code=400, detail="Kam se kam 1 image chahiye")
+        raise HTTPException(status_code=400, detail="At least 1 image is required")
 
     embedding = enroll_face_from_images(data.face_images)
     if not embedding:
-        raise HTTPException(status_code=400, detail="Kisi bhi image mein face detect nahi hua")
+        raise HTTPException(status_code=400, detail="No face was detected in any of the images")
 
     existing = db.query(FaceEnrollment).filter(
         FaceEnrollment.employee_id == data.employee_id
@@ -718,11 +720,11 @@ def check_in(
     company_id = _resolve_company_id(db, employee) or data.employee_id
     policy = _work_policy(db, company_id)
 
-    # ──── Attendance ka DIN — calendar date nahi, shift ka din ────
-    # Raat ki shift (22:00-05:00) mein 12 baje ke baad bhi din wahi rehta hai
+    # ──── The attendance DAY — the shift's day, not the calendar date ────
+    # On a night shift (22:00-05:00) the day stays the same past midnight
     today = work_date_for(policy, now)
 
-    # ──── Is din ka session pehle se hai? (checked-out bhi count hota hai) ────
+    # ──── Is there already a session for this day? (checked-out counts too) ────
     existing = db.query(AttendanceSession).filter(
         AttendanceSession.employee_id == data.employee_id,
         AttendanceSession.date == today
@@ -732,28 +734,28 @@ def check_in(
         if existing.status == AttendanceStatusEnum.checked_out:
             raise HTTPException(
                 status_code=400,
-                detail="Aaj ka din complete ho chuka hai — dobara check-in nahi ho sakta"
+                detail="Today is already complete — you cannot check in again"
             )
-        raise HTTPException(status_code=400, detail="Aap already checked in hain!")
+        raise HTTPException(status_code=400, detail="You are already checked in")
 
-    # ──── Kal ka session abhi khula to pehle wo band karo ────
-    # Warna dangling session hamesha ke liye khula reh jayega
+    # ──── If yesterday's session is still open, close that first ────
+    # Otherwise a dangling session stays open forever
     dangling = _open_session(db, data.employee_id, today)
     if dangling:
         raise HTTPException(
             status_code=400,
-            detail=f"{dangling.date} ka session abhi khula hai — "
-                   f"pehle us ka check-out karein"
+            detail=f"Your session from {dangling.date} is still open — "
+                   f"please check out of it first"
         )
 
     working_day = _is_working_day(policy, today)
 
-    # ──── Check-in window — shift ke bahar check-in nahi ────
+    # ──── Check-in window — no checking in outside the shift ────
     window = _checkin_window(policy, today, now)
     if not window["open"]:
         raise HTTPException(status_code=400, detail=window["message"])
 
-    # ──── Late check (sirf working day pe) ────
+    # ──── Late check (working days only) ────
     is_late = False
     late_by_minutes = 0
     if policy and working_day:
@@ -795,9 +797,9 @@ def check_in(
         created_at=now
     )
     db.add(session)
-    db.flush()          # session.id chahiye photo ke liye
+    db.flush()          # session.id is needed for the photo
 
-    # ──── Photo DB mein (sirf record ke liye — verification nahi) ────
+    # ──── Photo into the DB (for the record only — not verification) ────
     photo_saved = _store_photo(
         db, data.face_image, PhotoKindEnum.checkin,
         employee_id=data.employee_id, company_id=company_id,
@@ -842,21 +844,21 @@ def pause_session(
     )
 
     if not session:
-        raise HTTPException(status_code=404, detail="Active session nahi mila")
+        raise HTTPException(status_code=404, detail="No active session found")
 
     if data.session_id and data.session_id != session.id:
-        raise HTTPException(status_code=400, detail="Session id match nahi kar raha")
+        raise HTTPException(status_code=400, detail="Session id does not match")
 
     now = get_pkt_now()
 
-    # ──── Pehle se koi open break to nahi ────
+    # ──── Is there already an open break? ────
     open_interval = db.query(AttendanceInterval).filter(
         AttendanceInterval.session_id == session.id,
         AttendanceInterval.end_time == None
     ).first()
 
     if open_interval:
-        raise HTTPException(status_code=400, detail="Aap already break pe hain")
+        raise HTTPException(status_code=400, detail="You are already on a break")
 
     db.add(AttendanceInterval(
         session_id=session.id,
@@ -887,10 +889,10 @@ def resume_session(
     )
 
     if not session:
-        raise HTTPException(status_code=404, detail="Paused session nahi mila")
+        raise HTTPException(status_code=404, detail="No paused session found")
 
     if data.session_id and data.session_id != session.id:
-        raise HTTPException(status_code=400, detail="Session id match nahi kar raha")
+        raise HTTPException(status_code=400, detail="Session id does not match")
 
     now = get_pkt_now()
     pause_duration = 0.0
@@ -931,21 +933,21 @@ def check_out(
 
     today = _employee_work_date(db, data.employee_id)
 
-    # ──── Check-out pe koi time pabandi nahi — raat gaye bhi ho sakta hai ────
+    # ──── No time limit on check-out — it can happen late at night ────
     session = _open_session(db, data.employee_id, today)
 
     if not session:
-        raise HTTPException(status_code=404, detail="Active session nahi mila")
+        raise HTTPException(status_code=404, detail="No active session found")
 
     if data.session_id and data.session_id != session.id:
-        raise HTTPException(status_code=400, detail="Session id match nahi kar raha")
+        raise HTTPException(status_code=400, detail="Session id does not match")
 
     if not session.check_in_time:
-        raise HTTPException(status_code=400, detail="Check-in time missing — check-out nahi ho sakta")
+        raise HTTPException(status_code=400, detail="Check-in time is missing — cannot check out")
 
     now = get_pkt_now()
 
-    # ──── Khule hue breaks band karo ────
+    # ──── Close any open breaks ────
     open_intervals = db.query(AttendanceInterval).filter(
         AttendanceInterval.session_id == session.id,
         AttendanceInterval.end_time == None
@@ -976,7 +978,7 @@ def check_out(
     net_hours = gross_hours - (total_pause_minutes / 60) if break_excluded else gross_hours
     net_hours = max(0.0, net_hours)
 
-    # ──── Under / Overtime (sirf working day pe) ────
+    # ──── Under / Overtime (working days only) ────
     is_undertime = False
     undertime_minutes = 0
     is_overtime = False
@@ -991,17 +993,17 @@ def check_out(
             raw_overtime = (net_hours - policy.overtime_threshold) * 60
             overtime_minutes = int(min(raw_overtime, (policy.max_overtime_per_day or 0) * 60))
     elif policy and not session.is_working_day:
-        # ──── Off-day pe kaam = poora overtime ────
+        # ──── Work on an off-day = all overtime ────
         overtime_minutes = int(min(net_hours * 60, (policy.max_overtime_per_day or 0) * 60))
 
-    # ──── Shift end se pehle nikal gaya? ────
+    # ──── Did they leave before the shift ended? ────
     is_early_checkout = False
     early_checkout_minutes = 0
 
     if policy and session.is_working_day and now.date() == session.date:
         shift_start_m = _parse_hhmm(policy.shift_start)
         shift_end_m = _parse_hhmm(policy.shift_end)
-        # ──── Overnight shift (end < start) pe yeh calculation valid nahi ────
+        # ──── This calculation is not valid on an overnight shift (end < start) ────
         if (shift_end_m is not None and shift_start_m is not None
                 and shift_end_m > shift_start_m):
             checkout_m = now.hour * 60 + now.minute
@@ -1009,7 +1011,7 @@ def check_out(
                 is_early_checkout = True
                 early_checkout_minutes = shift_end_m - checkout_m
 
-    # ──── Flag aur minutes hamesha match karein ────
+    # ──── The flag and the minutes must always agree ────
     is_overtime = overtime_minutes > 0
     is_undertime = undertime_minutes > 0
 
@@ -1104,7 +1106,7 @@ def get_daily_report(
     try:
         target_date = date.fromisoformat(report_date)
     except ValueError:
-        raise HTTPException(status_code=400, detail="Date format YYYY-MM-DD hona chahiye")
+        raise HTTPException(status_code=400, detail="Date format must be YYYY-MM-DD")
 
     session = db.query(AttendanceSession).filter(
         AttendanceSession.employee_id == employee_id,
@@ -1117,7 +1119,7 @@ def get_daily_report(
             "report": None,
             "on_leave": leave is not None,
             "leave_type": getattr(leave.leave_type, "value", None) if leave else None,
-            "message": "Is din ka record nahi mila"
+            "message": "No record found for this day"
         }
 
     intervals = db.query(AttendanceInterval).filter(
@@ -1155,7 +1157,7 @@ def get_attendance_history(
         if to_date:
             query = query.filter(AttendanceSession.date <= date.fromisoformat(to_date))
     except ValueError:
-        raise HTTPException(status_code=400, detail="Date format YYYY-MM-DD hona chahiye")
+        raise HTTPException(status_code=400, detail="Date format must be YYYY-MM-DD")
 
     sessions = query.order_by(AttendanceSession.date.desc()).limit(limit).all()
     photos = _photo_kinds_for(db, [s.id for s in sessions])
@@ -1185,7 +1187,7 @@ def get_today_status(
     company_id = _resolve_company_id(db, employee)
     policy = _work_policy(db, company_id)
 
-    # ──── Shift ka din, calendar ka nahi (raat ki shift ke liye) ────
+    # ──── The shift's day, not the calendar's (for night shifts) ────
     today = work_date_for(policy, now)
     window = _checkin_window(policy, today, now)
 
@@ -1194,7 +1196,7 @@ def get_today_status(
         AttendanceSession.date == today
     ).first()
 
-    # ──── Kal ka khula session (raat bhar kaam kiya) ────
+    # ──── Yesterday's still-open session (worked through the night) ────
     if not session:
         session = _open_session(db, employee_id, today)
 
@@ -1211,12 +1213,12 @@ def get_today_status(
             "on_leave": leave is not None,
             "checkin_window": window,
             "message": (
-                "Aaj approved leave pe hain" if leave
-                else (window["message"] if not window["open"] else "Aaj check-in nahi ki")
+                "On approved leave today" if leave
+                else (window["message"] if not window["open"] else "Not checked in today")
             )
         }
 
-    # ──── Ab tak ke breaks ────
+    # ──── Breaks so far ────
     intervals = db.query(AttendanceInterval).filter(
         AttendanceInterval.session_id == session.id
     ).all()
@@ -1236,12 +1238,12 @@ def get_today_status(
     out["checkin_window"] = window
     out["pause_minutes_so_far"] = round(pause_so_far, 2)
 
-    # ──── Session kal ka hai? (raat bhar ka kaam) ────
+    # ──── Is the session from yesterday? (an overnight shift) ────
     out["is_previous_day_session"] = session.date != today
     if out["is_previous_day_session"]:
-        out["message"] = f"{session.date} ka session abhi khula hai — check-out karein"
+        out["message"] = f"Your session from {session.date} is still open — please check out"
 
-    # ──── Live elapsed seconds — timer refresh pe reset na ho ────
+    # ──── Live elapsed seconds — the timer must not reset on refresh ────
     if session.check_in_time and session.status != AttendanceStatusEnum.checked_out:
         elapsed = (now - session.check_in_time).total_seconds()
         out["elapsed_seconds"] = int(max(0, elapsed - pause_so_far * 60))
@@ -1283,11 +1285,11 @@ def self_enroll_face(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    # ──── Apna hi face enroll ho sakta hai ────
+    # ──── You may only enrol your own face ────
     employee_id = current_user["user_id"]
 
     if not data.face_images:
-        raise HTTPException(status_code=400, detail="Kam se kam 1 image chahiye")
+        raise HTTPException(status_code=400, detail="At least 1 image is required")
 
     embedding = enroll_face_from_images(data.face_images)
     if not embedding:
@@ -1315,7 +1317,7 @@ def self_enroll_face(
         ))
         message = "Face enrolled!"
 
-    # ──── Reference photo bhi DB mein rakho (pehle kahin save nahi hoti thi) ────
+    # ──── Keep the reference photo in the DB too (it used to be saved nowhere) ────
     photo_saved = _store_photo(
         db, data.face_images[0], PhotoKindEnum.enrollment,
         employee_id=employee_id, company_id=company_id, captured_at=now,
@@ -1327,7 +1329,7 @@ def self_enroll_face(
 
 
 # ══════════════════════════════════════════════
-# Route 11: CEO — Team Attendance (kisi bhi din ka)
+# Route 11: CEO — Team Attendance (for any day)
 # ══════════════════════════════════════════════
 @router.get("/flags/today")
 def get_team_attendance(
@@ -1336,35 +1338,35 @@ def get_team_attendance(
     current_user: dict = Depends(require_ceo)
 ):
     """
-    Poori team ka attendance — un employees ke saath jinhone check-in
-    nahi kiya (Absent / On Leave). Pehle sirf checked-in wale aate the
-    isliye 'Absent' count hamesha 0 rehta tha.
+    The whole team's attendance — including employees who never checked
+    in (Absent / On Leave). Previously only checked-in people appeared
+    so the 'Absent' count always stayed at 0.
     """
     ceo = _get_user_or_404(db, current_user["user_id"])
     company_id = ceo.id
     now_pkt = get_pkt_now()
 
-    # Aaj ka SHIFT wala din — is se pata chalta hai ke maanga gaya din
-    # guzar chuka hai, chal raha hai, ya abhi aaya hi nahi
+    # Today's SHIFT day — this tells us whether the requested day has
+    # passed, is running, or has not arrived yet
     current_work_date = _work_date(db, company_id, now_pkt)
 
     try:
         day = (date.fromisoformat(report_date) if report_date
                else current_work_date)
     except ValueError:
-        raise HTTPException(status_code=400, detail="Date format YYYY-MM-DD hona chahiye")
+        raise HTTPException(status_code=400, detail="Date format must be YYYY-MM-DD")
 
     employees = _company_employees(db, ceo)
     employee_ids = [e.id for e in employees]
 
-    # ──── Ek query mein saare sessions (N+1 nahi) ────
+    # ──── All sessions in one query (no N+1) ────
     sessions = db.query(AttendanceSession).filter(
         AttendanceSession.company_id == company_id,
         AttendanceSession.date == day
     ).all()
     session_map = {s.employee_id: s for s in sessions}
 
-    # ──── Ek query mein approved leaves ────
+    # ──── Approved leaves in one query ────
     leaves = db.query(LeaveRequest).filter(
         LeaveRequest.company_id == company_id,
         LeaveRequest.status == LeaveStatusEnum.approved,
@@ -1403,8 +1405,8 @@ def get_team_attendance(
             elif not working_day:
                 row["attendance_status"] = "Off Day"
             else:
-                # Absent kehna jaldbazi hogi agar check-in ka mauqa
-                # abhi baqi hai — window band hone par hi Absent
+                # Calling someone absent is premature while they can still
+                # check in — Absent only once the window has closed
                 status, note = _no_session_status(
                     policy, day, now_pkt, window, current_work_date
                 )
@@ -1422,8 +1424,8 @@ def get_team_attendance(
     late = _count("Late")
     on_leave = _count("On Leave")
     absent = _count("Absent")
-    pending = _count("Not Checked In")     # abhi aa sakte hain
-    upcoming = _count("Upcoming")          # shift shuru hi nahi hui
+    pending = _count("Not Checked In")     # can still arrive
+    upcoming = _count("Upcoming")          # the shift has not started
 
     return {
         "date": str(day),
@@ -1431,8 +1433,8 @@ def get_team_attendance(
         "is_working_day": working_day,
         "total": len(rows),
 
-        # ──── Shift ka status — UI isi se batata hai ke Absent
-        #      final hai ya abhi count chal raha hai ────
+        # ──── Shift state — the UI uses this to say whether Absent is
+        #      final or the count is still running ────
         "shift_state": {
             "is_today": day == current_work_date,
             "is_past": day < current_work_date,
@@ -1441,12 +1443,24 @@ def get_team_attendance(
             "window_message": window.get("message"),
             "opens_at": window.get("opens_at"),
             "closes_at": window.get("closes_at"),
-            "attendance_final": day < current_work_date or (
-                window.get("enforced") and window.get("reason") == "shift_ended"
-            ),
+            # ══════════════════════════════════════════
+            # Has the Absent decision been settled?
+            # ══════════════════════════════════════════
+            # This condition used to be written out separately:
+            #     window.enforced AND reason == "shift_ended"
+            # But `_no_session_status()` also marks Absent without enforce
+            # once the shift is over. The result: with enforce off, rows
+            # showed "Absent" while this flag stayed False, so the UI showed
+            # a "Not in yet" card above — two places saying two things.
+            #
+            # The flag now comes from the SAME helper that builds the row
+            # statuses. One rule, one place — they can never disagree.
+            "attendance_final": _no_session_status(
+                policy, day, now_pkt, window, current_work_date
+            )[0] == "Absent",
         },
 
-        # ──── Active policy — dashboard pe dikhane ke liye ────
+        # ──── The active policy — for display on the dashboard ────
         "policy": {
             "shift_start": policy.shift_start,
             "shift_end": policy.shift_end,
@@ -1497,7 +1511,7 @@ def get_monthly_summary(
     _assert_can_view(db, current_user, employee_id)
 
     if not 1 <= month <= 12:
-        raise HTTPException(status_code=400, detail="Month 1-12 ke beech hona chahiye")
+        raise HTTPException(status_code=400, detail="Month must be between 1 and 12")
 
     _, days_in_month = monthrange(year, month)
     start = date(year, month, 1)
@@ -1551,9 +1565,9 @@ def get_attendance_overview(
     current_user: dict = Depends(require_ceo)
 ):
     """
-    Chart data — pehle frontend Math.random() se dummy bana raha tha.
-    weekly  = pichhle 7 din
-    monthly = current month ka har din (aaj tak)
+    Chart data — the frontend used to fake this with Math.random().
+    weekly  = the last 7 days
+    monthly = every day of the current month (up to today)
     """
     ceo = _get_user_or_404(db, current_user["user_id"])
     company_id = ceo.id
@@ -1591,8 +1605,8 @@ def get_attendance_overview(
     for s in sessions:
         by_day.setdefault(s.date, []).append(s)
 
-    # Aaj ka din abhi chal raha hai — jo abhi tak nahi aaya wo "absent"
-    # nahi, "pending" hai. Absent tabhi jab check-in window band ho jaye.
+    # Today is still in progress — someone who has not arrived is "pending",
+    # not "absent". Absent only once the check-in window has closed.
     today_window = _checkin_window(policy, today, get_pkt_now())
     today_final = bool(
         today_window.get("enforced") and today_window.get("reason") == "shift_ended"
@@ -1610,7 +1624,7 @@ def get_attendance_overview(
         missing = max(0, total_employees - present - on_leave)
 
         if not working:
-            absent = pending = 0        # off day — koi absent nahi
+            absent = pending = 0        # off day — nobody is absent
         elif day == today and not today_final:
             absent, pending = 0, missing
         else:
@@ -1641,7 +1655,7 @@ def get_attendance_overview(
 
 
 # ══════════════════════════════════════════════
-# Route 14: Attendance Photo (CEO ya khud employee)
+# Route 14: Attendance photo (the CEO, or the employee themselves)
 # ══════════════════════════════════════════════
 @router.get("/photo/{session_id}/{kind}")
 def get_attendance_photo(
@@ -1650,19 +1664,19 @@ def get_attendance_photo(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    """Photo DB se serve hoti hai. Purane records ki file abhi bhi chal jaayegi."""
+    """Photos are served from the DB. Files from older records still work."""
     if kind not in ("checkin", "checkout"):
-        raise HTTPException(status_code=400, detail="kind 'checkin' ya 'checkout' hona chahiye")
+        raise HTTPException(status_code=400, detail="kind must be 'checkin' or 'checkout'")
 
     session = db.query(AttendanceSession).filter(
         AttendanceSession.id == session_id
     ).first()
     if not session:
-        raise HTTPException(status_code=404, detail="Session nahi mila")
+        raise HTTPException(status_code=404, detail="Session not found")
 
     _assert_can_view(db, current_user, session.employee_id)
 
-    # ──── 1. DB (asal jagah) ────
+    # ──── 1. The DB (the real place) ────
     photo = db.query(AttendancePhoto).filter(
         AttendancePhoto.session_id == session_id,
         AttendancePhoto.kind == kind
@@ -1673,7 +1687,7 @@ def get_attendance_photo(
             content=photo.image_data,
             media_type=photo.mime_type or "image/jpeg",
             headers={
-                # ──── Attendance photo badalti nahi — browser cache kar le ────
+                # ──── An attendance photo never changes — let the browser cache it ────
                 "Cache-Control": "private, max-age=86400",
                 "Content-Disposition":
                     f'inline; filename="{kind}_{session.employee_id}_{session.date}.jpg"',
@@ -1685,7 +1699,7 @@ def get_attendance_photo(
     if path and os.path.exists(path):
         return FileResponse(path, media_type="image/jpeg", filename=os.path.basename(path))
 
-    raise HTTPException(status_code=404, detail="Photo available nahi hai")
+    raise HTTPException(status_code=404, detail="Photo is not available")
 
 
 # ══════════════════════════════════════════════
@@ -1697,7 +1711,7 @@ def get_enrollment_photo(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    """Employee ki enrollment reference photo — CEO compare kar sake"""
+    """The employee's enrolment reference photo — so the CEO can compare"""
     _assert_can_view(db, current_user, employee_id)
 
     photo = db.query(AttendancePhoto).filter(
@@ -1706,7 +1720,7 @@ def get_enrollment_photo(
     ).first()
 
     if not photo:
-        raise HTTPException(status_code=404, detail="Enrollment photo available nahi hai")
+        raise HTTPException(status_code=404, detail="Enrolment photo is not available")
 
     return Response(
         content=photo.image_data,
@@ -1716,14 +1730,14 @@ def get_enrollment_photo(
 
 
 # ══════════════════════════════════════════════
-# Route 15: Employee — Office info (check-in se pehle)
+# Route 15: Employee — office info (before checking in)
 # ══════════════════════════════════════════════
 @router.get("/my-office")
 def get_my_office(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    """Employee ko pata ho office kahan hai aur radius kya hai"""
+    """So the employee knows where the office is and what the radius is"""
     user = _get_user_or_404(db, current_user["user_id"])
     company_id = _resolve_company_id(db, user)
 
@@ -1745,11 +1759,11 @@ def get_my_office(
             "longitude": office.longitude,
             "radius_meters": office.radius_meters,
         } if office else None,
-        # ──── Poori policy — employee ko bhi maloom honi chahiye ────
+        # ──── The full policy — the employee should know it too ────
         "policy": _policy_view(policy, window),
         "checkin_window": window,
         "is_working_day": _is_working_day(policy, today),
-        # ──── Attendance ka din (raat ki shift mein calendar se alag hota hai) ────
+        # ──── The attendance day (differs from the calendar on a night shift) ────
         "work_date": str(today),
         "is_overnight_shift": is_overnight_shift(policy),
         "server_date": str(get_pkt_now().date()),

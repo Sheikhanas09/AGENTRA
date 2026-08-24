@@ -9,7 +9,7 @@ from fastapi.security import OAuth2PasswordBearer
 
 load_dotenv()
 
-# ── bcrypt ki jagah sha256_crypt use karo ──
+# ── Use sha256_crypt instead of bcrypt ──
 pwd_context = CryptContext(
     schemes=["sha256_crypt"],
     deprecated="auto"
@@ -22,16 +22,16 @@ def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
 
 # ══════════════════════════════════════════════
-# JWT ka secret
+# The JWT secret
 # ══════════════════════════════════════════════
-# Pehle yeh do jagah likha tha: yahan (asal, istemal hone wala) aur
-# `app/config.py` mein — jo kabhi import hi nahi hota tha. Koi config.py
-# mein secret badal kar samajhta ke JWT ka key badal gaya, halanke kuch
-# nahi hota. Ab wo file hata di gayi hai, secret sirf yahan se aata hai.
+# This used to live in two places: here (the real one, actually used) and
+# in `app/config.py` — which was never imported. Someone could change the
+# secret in config.py and believe the JWT key had changed, when nothing
+# happened at all. That file is gone; the secret comes only from here.
 #
-# `.env` mein SECRET_KEY rakhein to wohi chalega. Na rakhein to neeche
-# wali default value chalti hai — magar startup par warning aati hai,
-# taake yeh baat chup chaap na guzar jaye.
+# Put SECRET_KEY in `.env` and that is used. Leave it out and the default
+# below applies — but a warning is printed at startup, so this never
+# passes unnoticed.
 _FALLBACK_SECRET = "your-secret-key-change-this-in-production"
 
 SECRET_KEY = os.getenv("SECRET_KEY", "").strip() or _FALLBACK_SECRET
@@ -40,9 +40,9 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
 
 if SECRET_KEY == _FALLBACK_SECRET:
     print(
-        "[security] WARNING: SECRET_KEY .env mein set nahi — default key "
-        "chal rahi hai. Production se pehle `.env` mein SECRET_KEY dalein "
-        "(dhyan rahe: badalte hi sab users ek dafa logout ho jayenge)."
+        "[security] WARNING: SECRET_KEY is not set in .env — the default key "
+        "is in use. Set SECRET_KEY in `.env` before production "
+        "(note: changing it logs every user out once)."
     )
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")

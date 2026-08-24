@@ -9,20 +9,23 @@ from langgraph.graph import StateGraph, END
 from typing import TypedDict
 from dotenv import load_dotenv
 
+from app.utils.llm import groq_model
+
 load_dotenv()
 
-# ──── Sirf yeh do faisle qabool hain ────
+# ──── Only these two decisions are accepted ────
 AUTO_APPROVE = "auto_approve"
 ESCALATE = "escalate_to_ceo"
 
-# Isse kam similarity wale chunks ko "policy mil gayi" nahi maante
+# Chunks below this similarity are not treated as "policy found"
 MIN_CHUNK_SIMILARITY = 0.25
 
 
 # ──── Models — lazy init ────
-# Pehle yeh module load hote hi ban jate the. Agar GROQ_API_KEY na ho ya
-# koi ML package toota ho to import hi phat jata tha aur employee leave
-# apply hi nahi kar pata tha. Ab pehli zarurat par bante hain.
+# These used to be built as soon as the module loaded. Without a
+# GROQ_API_KEY, or with a broken ML package, the import itself blew up and
+# an employee could not apply for leave at all. They are now built on
+# first use.
 _embedding_model = None
 _chroma_client = None
 _llm = None
@@ -31,7 +34,7 @@ _llm = None
 def get_embedding_model():
     global _embedding_model
     if _embedding_model is None:
-        # Same model jo CV screening mein use ki — text → vector
+        # The same model CV screening uses — text → vector
         _embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
     return _embedding_model
 
@@ -50,13 +53,18 @@ def get_llm():
     if _llm is None:
         api_key = os.getenv("GROQ_API_KEY")
         if not api_key:
-            raise RuntimeError("GROQ_API_KEY set nahi hai")
+            raise RuntimeError("GROQ_API_KEY is not set")
         _llm = ChatGroq(
             api_key=api_key,
-            model="llama-3.1-8b-instant",
+            model=groq_model(),
             temperature=0.1,
-            # ↑ Very low — leave decisions consistent hone chahiye
-            max_tokens=1000,
+            # ↑ Very low — leave decisions must be consistent
+            #
+            # This was 1000, but gpt-oss is a REASONING model: its thinking
+            # tokens come out of the same budget. On the full handbook the
+            # answer was CUT off mid-way at 1000 (truncated JSON, parse
+            # failure). At 4000 the real cost is ~1100 — plenty of room.
+            max_tokens=4000,
         )
     return _llm
 
@@ -88,14 +96,14 @@ class LeaveAgentState(TypedDict):
     error: str
 
 
-# ──── Node 1: RAG — Policy Chunks Retrieve karo ────
+# ──── Node 1: RAG — retrieve the policy chunks ────
 def rag_retrieval_node(state: LeaveAgentState) -> LeaveAgentState:
     """
-    ChromaDB se relevant policy chunks nikalo
-    Company ki specific policy se
+    Pull the relevant policy chunks out of ChromaDB,
+    from this company's own policy
     """
 
-    # ──── Query banao ────
+    # ──── Build the query ────
     query = f"""
     {state['leave_type']} leave policy rules
     maximum consecutive days auto approval
@@ -103,22 +111,22 @@ def rag_retrieval_node(state: LeaveAgentState) -> LeaveAgentState:
     conditions quota per year
     {state['total_days']} days leave request
     """
-    # ↑ Leave type + duration se query banao
+    # ↑ Build the query from the leave type and duration
     # Taake relevant policy clauses mile
 
     try:
         collection_name = f"company_{state['company_id']}_policies"
-        # ──── Cosine space — warna `1 - distance` cosine similarity nahi hoti ────
-        # (settings.py mein bhi collection isi space se banti hai)
+        # ──── Cosine space — otherwise `1 - distance` is not cosine similarity ────
+        # (settings.py creates the collection with the same space)
         collection = get_chroma_client().get_or_create_collection(
             collection_name,
             metadata={"hnsw:space": "cosine"}
         )
 
-        # ──── Query embed karo ────
+        # ──── Embed the query ────
         query_embedding = get_embedding_model().encode(query).tolist()
 
-        # ──── ChromaDB se search karo ────
+        # ──── Search ChromaDB ────
         results = collection.query(
             query_embeddings=[query_embedding],
             n_results=5
@@ -142,7 +150,7 @@ def rag_retrieval_node(state: LeaveAgentState) -> LeaveAgentState:
 
     except Exception as e:
         print(f"RAG error: {e}")
-        # ──── Policy nahi mili → CEO escalate ────
+        # ──── No policy found → escalate to the CEO ────
         return {
             **state,
             "retrieved_chunks": [],
@@ -157,20 +165,20 @@ def llm_decision_node(state: LeaveAgentState) -> LeaveAgentState:
     Retrieved policy chunks + leave request → LLM → Decision
     """
 
-    # ──── Sirf waqai relevant chunks — halke match pe auto-approve nahi ────
+    # ──── Only genuinely relevant chunks — no auto-approve on a weak match ────
     relevant = [
         c for c in state["retrieved_chunks"]
         if (c.get("similarity") or 0) >= MIN_CHUNK_SIMILARITY
     ]
 
     if not relevant:
-        # ──── Policy mili hi nahi (ya bilkul be-rabt hai) → seedha CEO ────
-        # LLM se poochne ka faida nahi, wo kabhi kabhi phir bhi approve kar deta hai
+        # ──── No policy at all (or completely unrelated) → straight to the CEO ────
+        # Asking the LLM gains nothing; it sometimes approves anyway
         return {
             **state,
             "decision": ESCALATE,
-            "reason_text": "Is leave type ke liye policy mein koi wazeh clause "
-                           "nahi mila — CEO manually review karega.",
+            "reason_text": "No clear clause for this leave type was found in "
+                           "the policy — HR will review it manually.",
             "policy_reference": "",
             "requires_document": False,
             "error": "",
@@ -181,7 +189,7 @@ def llm_decision_node(state: LeaveAgentState) -> LeaveAgentState:
         for i, chunk in enumerate(relevant)
     ])
 
-    # ──── Prompt banao ────
+    # ──── Build the prompt ────
     prompt = f"""
 You are the HRX Leave Agent. Evaluate this leave request strictly based on the company policy.
 
@@ -222,7 +230,7 @@ Respond ONLY in this JSON format:
         response = get_llm().invoke(messages)
         raw = response.content.strip()
 
-        # ──── JSON clean karo ────
+        # ──── Clean up the JSON ────
         if "```json" in raw:
             raw = raw.split("```json")[1].split("```")[0].strip()
         elif "```" in raw:
@@ -230,9 +238,10 @@ Respond ONLY in this JSON format:
 
         result = json.loads(raw)
 
-        # ──── Decision sanitize karo ────
-        # LLM kuch bhi likh sakta hai ("approve", "yes", garbage) —
-        # sirf saaf "auto_approve" ko auto_approve maano, warna CEO ke paas
+        # ──── Sanitise the decision ────
+        # An LLM can write anything ("approve", "yes", garbage) — only a
+        # plain "auto_approve" counts as auto_approve, otherwise it goes
+        # to the CEO
         raw_decision = str(result.get("decision", "")).strip().lower()
         decision = AUTO_APPROVE if raw_decision == AUTO_APPROVE else ESCALATE
 
@@ -247,7 +256,7 @@ Respond ONLY in this JSON format:
 
     except Exception as e:
         print(f"LLM decision error: {e}")
-        # ──── LLM fail → Conservative: CEO ko bhejo ────
+        # ──── LLM failed → be conservative: send it to the CEO ────
         return {
             **state,
             "decision": ESCALATE,
@@ -258,7 +267,7 @@ Respond ONLY in this JSON format:
         }
 
 
-# ──── Graph Build karo ────
+# ──── Build the graph ────
 def build_leave_graph():
     graph = StateGraph(LeaveAgentState)
 

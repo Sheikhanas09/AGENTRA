@@ -17,14 +17,14 @@ class RankingState(TypedDict):
 def sort_candidates_node(state: RankingState) -> RankingState:
     candidates = state["candidates"]
 
-    # ──── Final score se sort karo ────
+    # ──── Sort by final score ────
     sorted_candidates = sorted(
         candidates,
         key=lambda x: x.get("final_score", 0),
         reverse=True
     )
 
-    # ──── Rank assign karo ────
+    # ──── Assign the rank ────
     ranked = []
     for i, candidate in enumerate(sorted_candidates):
         ranked.append({
@@ -41,7 +41,7 @@ def sort_candidates_node(state: RankingState) -> RankingState:
     }
 
 
-# ──── Node 2: Category assign karo ────
+# ──── Node 2: assign the category ────
 def assign_category_node(state: RankingState) -> RankingState:
     ranked = state["ranked_list"]
     updated = []

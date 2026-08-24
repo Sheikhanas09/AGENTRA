@@ -1,5 +1,6 @@
 import os
 import json
+from decimal import Decimal, InvalidOperation
 import math
 import shutil
 from datetime import datetime, date
@@ -20,7 +21,7 @@ router = APIRouter(prefix="/settings", tags=["Settings"])
 
 def require_ceo(current_user: dict = Depends(get_current_user)):
     if current_user["role"] not in ["ceo", "superadmin"]:
-        raise HTTPException(status_code=403, detail="Sirf CEO yeh kar sakta hai")
+        raise HTTPException(status_code=403, detail="Only the CEO can do this")
     return current_user
 
 
@@ -30,17 +31,17 @@ class WorkPolicySchema(BaseModel):
     shift_start: str
     late_tolerance_mins: int = 15
     shift_end: str
-    # ──── Check-in sirf shift ke darmiyan ────
+    # ──── Check in only during the shift ────
     enforce_shift_window: bool = True
     early_checkin_grace_mins: int = 60
-    # ──── CEO kitne ghante mein leave ka jawab de (0 = kabhi auto nahi) ────
+    # ──── Hours the CEO has to answer a leave request (0 = never auto) ────
     leave_auto_approve_hours: int = 24
     min_daily_hours: float = 8.0
     overtime_threshold: float = 9.0
     max_overtime_per_day: float = 3.0
     break_policy: str = "excluded"
-    # ──── Break kab aur kitni der ────
-    # start/end khali = "itne minute, jab chahein" (flexible)
+    # ──── When the break is, and how long ────
+    # empty start/end = "this many minutes, whenever you like" (flexible)
     break_minutes: int = 60
     break_start: Optional[str] = None
     break_end: Optional[str] = None
@@ -57,16 +58,16 @@ class OfficeLocationSchema(BaseModel):
     latitude: float
     longitude: float
     radius_meters: int = 200
-    # ↑ Modular — CEO change kar sakta hai
+    # ↑ Modular — the CEO can change it
 
 
 def _clean_time(value):
     """
-    Khali string ko None banao.
+    Turn an empty string into None.
 
-    HTML ka <input type="time"> khali hone par "" bhejta hai. Wo seedha
-    save ho jata to `break_start` khali string ban jati — na None, na
-    waqt — aur "break muqarrar hai ya nahi" ka check ghalat ho jata.
+    An HTML <input type="time"> sends "" when empty. Saved as-is that
+    would make `break_start` an empty string — neither None nor a time —
+    and the "is the break fixed" check would go wrong.
     """
     value = (value or "").strip()
     return value or None
@@ -76,7 +77,7 @@ def _clean_time(value):
 def calculate_distance_meters(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     """
     Haversine formula
-    2 GPS points ke beech distance meters mein
+    The distance between two GPS points, in metres
     """
     R = 6371000  # Earth radius meters
 
@@ -189,22 +190,21 @@ def get_work_policy(
     }
 
 
-# ──── Route 2b: Policy se Working Hours ki tajweez ────
+# ──── Route 2b: Suggest working hours from the policy ────
 @router.post("/work-policy/extract")
 def extract_work_policy_suggestion(
     db: Session = Depends(get_db),
     current_user: dict = Depends(require_ceo)
 ):
     """
-    Policy document parh kar working hours TAJWEEZ karo.
+    Read the policy document and SUGGEST working hours.
 
-    Upload par yeh khud chal jata hai (`extract_and_apply_work_policy`).
-    Yeh route dobara chalane ke liye hai — aur yeh kuch SAVE NAHI karta.
-    Values form mein bhar jati hain, CEO dekhta hai, badal sakta hai,
-    phir khud Save dabata hai.
+    This runs by itself on upload (`extract_and_apply_work_policy`).
+    This route exists for a retry — and it SAVES NOTHING. The values fill
+    the form, the CEO looks at them, can change them, then presses Save.
 
-    Har field ke saath `source_quote` aata hai — document ki wo asal line
-    jis se value nikli, taake CEO khud tasdeeq kar sake.
+    Every field carries a `source_quote` — the exact line in the document
+    the value came from, so the CEO can verify it.
     """
     ceo = db.query(User).filter(User.id == current_user["user_id"]).first()
 
@@ -216,7 +216,7 @@ def extract_work_policy_suggestion(
     if not active_policy:
         raise HTTPException(
             status_code=400,
-            detail="Koi active policy document nahi — pehle Policy Document tab se upload karein"
+            detail="No active policy document — please upload one from the Policy Document tab first"
         )
 
     try:
@@ -226,11 +226,11 @@ def extract_work_policy_suggestion(
         print(f"Work policy extraction failed: {e}")
         raise HTTPException(
             status_code=503,
-            detail="Agent abhi dastyab nahi — working hours manually set karein"
+            detail="The agent is unavailable — please set the working hours manually"
         )
 
-    # ──── Har tajweez ko maujooda value ke saath milao ────
-    # CEO ko yeh dikhna chahiye ke kya BADAL raha hai, sirf nayi value nahi
+    # ──── Match each suggestion against the current value ────
+    # The CEO should see what is CHANGING, not just the new value
     current = db.query(CompanyWorkPolicy).filter(
         CompanyWorkPolicy.company_id == ceo.id
     ).first()
@@ -244,7 +244,7 @@ def extract_work_policy_suggestion(
 
     return {
         "ran": True,
-        "saved": False,          # sirf tajweez — CEO Save dabayega
+        "saved": False,          # suggestions only — the CEO presses Save
         "fields": result["fields"],
         "warnings": result["warnings"],
         "chunks_used": result["chunks_used"],
@@ -261,8 +261,8 @@ def save_office_location(
     current_user: dict = Depends(require_ceo)
 ):
     """
-    CEO office ki location set kare
-    Modular — CEO settings se change kar sakta hai
+    The CEO sets the office location.
+    Modular — it can be changed from Settings.
     """
     ceo = db.query(User).filter(User.id == current_user["user_id"]).first()
     company_id = ceo.id
@@ -352,7 +352,7 @@ def get_office_location(
     }
 
 
-# ──── Route 5: GPS Verify (Employee check-in se call hoga) ────
+# ──── Route 5: GPS verify (called from the employee check-in) ────
 @router.post("/verify-location")
 def verify_location(
     employee_lat: float,
@@ -361,8 +361,8 @@ def verify_location(
     db: Session = Depends(get_db)
 ):
     """
-    Employee ki GPS location verify karo
-    Office radius mein hai ya nahi
+    Verify the employee's GPS location —
+    whether it is inside the office radius.
     """
     office = db.query(OfficeLocation).filter(
         OfficeLocation.company_id == company_id,
@@ -370,7 +370,7 @@ def verify_location(
     ).first()
 
     if not office:
-        # ──── Office set nahi → Allow karo ────
+        # ──── No office set → allow it ────
         return {
             "verified": True,
             "distance_meters": 0,
@@ -399,19 +399,19 @@ def verify_location(
 def extract_and_apply_leave_types(session, company_id: int, policy_id: int,
                                   policy_text: str = ""):
     """
-    Policy index hone ke fauran baad leave types nikal kar laga do.
+    As soon as the policy is indexed, extract and apply the leave types.
 
-    CEO ko button dabane ki zarurat nahi — document hi asal sach hai.
-    Jo type policy mein na ho wo band ho jati hai, jo nayi ho wo ban jati hai,
-    aur employees ke maujooda balance bhi config se mil jate hain.
+    The CEO does not have to press a button — the document is the truth.
+    A type missing from the policy is disabled, a new one is created, and
+    employees' existing balances are brought in line with the config.
 
-    ═══ AHEM GUARD ═══
-    Agar agent ko koi type MILI HI NAHI (ya wo fail ho gaya) to KUCH NAHI
-    badalte. Warna Groq down hone par ya kharab PDF par saari types ek saath
-    band ho jatin aur poori company ki leave ruk jati.
+    ═══ THE IMPORTANT GUARD ═══
+    If the agent finds NO type at all (or fails outright) then NOTHING is
+    changed. Otherwise Groq being down, or one bad PDF, would disable every
+    type at once and stop leave for the whole company.
 
-    Natija `company_policies.policy_preview` mein save hota hai taake CEO
-    dekh sake ke kya hua — chup chaap kuch nahi hota.
+    The outcome is saved into `company_policies.policy_preview` so the CEO
+    can see what happened — nothing occurs silently.
     """
     summary = {"ran": False, "reason": "", "applied": [], "created": [], "disabled": []}
 
@@ -425,10 +425,10 @@ def extract_and_apply_leave_types(session, company_id: int, policy_id: int,
         if not extracted:
             summary["reason"] = (
                 result.get("error")
-                or "Policy document mein koi leave type nahi mili — "
-                   "purani types waise hi rehne di gayin"
+                or "No leave type was found in the policy document — "
+                   "the existing types were left unchanged"
             )
-            print(f"[policy] extraction ne kuch nahi diya — kuch nahi badla")
+            print(f"[policy] extraction returned nothing — nothing was changed")
         else:
             applied = apply_policy_types(
                 session, company_id, extracted, disable_missing=True
@@ -436,7 +436,7 @@ def extract_and_apply_leave_types(session, company_id: int, policy_id: int,
             summary.update(applied)
             summary["ran"] = True
             summary["warnings"] = result.get("warnings", [])
-            summary["reason"] = f"{len(applied['applied'])} type(s) policy se laagu"
+            summary["reason"] = f"{len(applied['applied'])} type(s) applied from the policy"
             print(
                 f"[policy] types auto-applied: {applied['applied']} "
                 f"| band: {applied['disabled']} "
@@ -445,7 +445,7 @@ def extract_and_apply_leave_types(session, company_id: int, policy_id: int,
 
     except Exception as e:
         session.rollback()
-        summary["reason"] = f"Types nikalte waqt masla: {e}"
+        summary["reason"] = f"Problem while extracting the types: {e}"
         print(f"[policy] leave type extraction failed: {e}")
 
     _save_policy_preview(session, policy_id, "leave_types", summary)
@@ -454,10 +454,10 @@ def extract_and_apply_leave_types(session, company_id: int, policy_id: int,
 
 def _save_policy_preview(session, policy_id: int, key: str, summary: dict):
     """
-    Extraction ka natija `policy_preview` mein rakho — CEO ko dikhane ke liye.
+    Store the extraction outcome in `policy_preview` — to show the CEO.
 
-    Ek document se do cheezein nikalti hain (leave types + working hours),
-    is liye dono alag key mein rehti hain aur ek dusre ko mitati nahi.
+    Two things are extracted from one document (leave types + working
+    hours), so each lives under its own key and neither overwrites the other.
     """
     try:
         policy = session.query(CompanyPolicy).filter(
@@ -467,8 +467,8 @@ def _save_policy_preview(session, policy_id: int, key: str, summary: dict):
             return
 
         preview = policy.policy_preview
-        # Purana format seedha leave summary rakhta tha — usay nayi
-        # shape mein le aao warna wo natija gum ho jayega
+        # The old format stored the leave summary directly — migrate it to
+        # the new shape or that result would be lost
         if not isinstance(preview, dict) or "leave_types" not in preview:
             preview = {"leave_types": preview} if preview else {}
 
@@ -481,33 +481,33 @@ def _save_policy_preview(session, policy_id: int, key: str, summary: dict):
 
 def extract_and_apply_work_policy(session, company_id: int, policy_text: str = ""):
     """
-    Policy index hone ke baad **working hours** khud bhar do.
+    Once the policy is indexed, fill in the **working hours** automatically.
 
-    Leave types wala hi usool, magar ek bara farq:
-    types mein "policy mein nahi hai" ka matlab "band kar do" hai, magar
-    yahan uska matlab **"CEO ne jo set kiya wo waise hi rehne do"** hai.
-    Shift timings zaroori cheez hai — document khamosh ho to purani value
+    The same rule as leave types, with one big difference:
+    for types, "not in the policy" means "disable it", but here it means
+    **"leave whatever the CEO set exactly as it is"**.
+    Shift timings are essential — if the document is silent, the old value
     mitana galat hoga.
 
-    Yani: jo field MILI wo lag jati hai, jo NAHI mili wo CHHOTI NAHI JATI.
+    So: a field that was FOUND is applied; one that was NOT is LEFT ALONE.
 
     ═══ GUARD ═══
-    Agent ko kuch bhi na mile (ya wo fail ho jaye) to kuch nahi badalta.
-    Warna Groq down hone par ya kharab PDF par poori company ki shift
-    default 09:00-18:00 par chali jati.
+    If the agent finds nothing (or fails), nothing changes. Otherwise Groq
+    being down, or one bad PDF, would push the whole company's shift back
+    to the 09:00-18:00 default.
 
-    Return: summary dict — CEO ko dikhane ke liye
+    Return: a summary dict — for showing to the CEO
     """
-    # Shakl bilkul wahi jo `/work-policy/extract` deta hai — UI ka ek hi
-    # panel dono ko dikhata hai
+    # Exactly the shape `/work-policy/extract` returns — one UI panel
+    # displays both
     summary = {
         "ran": False, "reason": "",
         "fields": {},         # {name: {value, source_quote, confidence, ...}}
-        "skipped": [],        # jo document mein tha hi nahi
+        "skipped": [],        # fields that were not in the document at all
         "warnings": [],
     }
 
-    # Wahi fields jo Working Hours tab mein hain
+    # The same fields that appear on the Working Hours tab
     FIELDS = [
         "shift_start", "shift_end", "working_days",
         "late_tolerance_mins", "early_checkin_grace_mins",
@@ -522,23 +522,27 @@ def extract_and_apply_work_policy(session, company_id: int, policy_text: str = "
         result = extract_work_policy(company_id, policy_text)
         found = result.get("fields", {})
         summary["warnings"] = result.get("warnings", [])
+        # The payroll rules come from this same result — there is no need
+        # to call the LLM again (and calling it again could give a slightly
+        # different answer)
+        summary["_all_fields"] = found
 
         if not found:
             summary["reason"] = (
                 result.get("error")
-                or "Policy document mein working hours nahi mile — "
+                or "No working hours were found in the policy document — "
                    "maujooda settings waise hi rehne di gayin"
             )
-            print("[policy] work policy: kuch nahi mila — kuch nahi badla")
+            print("[policy] work policy: nothing found — nothing changed")
             return summary
 
         policy = session.query(CompanyWorkPolicy).filter(
             CompanyWorkPolicy.company_id == company_id
         ).first()
 
-        # ──── Policy hi na ho to nayi banao ────
-        # Shift timings nullable nahi hain, is liye default rakhna parta
-        # hai — magar sirf tab jab document ne wo field di hi na ho.
+        # ──── If there is no policy at all, create one ────
+        # Shift timings are not nullable, so a default has to be set — but
+        # only when the document did not supply that field.
         if not policy:
             policy = CompanyWorkPolicy(
                 company_id=company_id,
@@ -571,17 +575,17 @@ def extract_and_apply_work_policy(session, company_id: int, policy_text: str = "
         session.commit()
 
         summary["ran"] = True
-        summary["saved"] = True          # yeh khud lag chuka hai
+        summary["saved"] = True          # this has already been applied
         summary["found_count"] = len(summary["fields"])
         summary["reason"] = (
-            f"{len(summary['fields'])} field policy se laagu, "
+            f"{len(summary['fields'])} field(s) applied from the policy, "
             f"{len(summary['skipped'])} manual"
         )
         print(f"[policy] work policy auto-applied: {list(summary['fields'])}")
 
     except Exception as e:
         session.rollback()
-        summary["reason"] = f"Working hours nikalte waqt masla: {e}"
+        summary["reason"] = f"Problem while extracting the working hours: {e}"
         print(f"[policy] work policy extraction failed: {e}")
 
     return summary
@@ -633,11 +637,11 @@ def process_policy_document(
         except:
             pass
 
-        # ──── Cosine space zaroori hai ────
-        # ChromaDB by default squared-L2 use karta hai. Unit vectors pe
-        # L2² = 2 - 2*cos, to `1 - distance` cosine similarity NAHI hoti
-        # (cos=0.5 pe 0 aata hai, cos=0 pe -1). Leave agent ka
-        # similarity threshold isi hisaab se ghalat lagta tha.
+        # ──── Cosine space is required ────
+        # ChromaDB defaults to squared L2. On unit vectors L2² = 2 - 2*cos,
+        # so `1 - distance` is NOT cosine similarity (cos=0.5 gives 0,
+        # cos=0 gives -1). The leave agent's
+        # similarity threshold was wrong for exactly that reason.
         collection = chroma_client.create_collection(
             collection_name,
             metadata={"hnsw:space": "cosine"}
@@ -653,9 +657,9 @@ def process_policy_document(
                 metadatas=[{"policy_id": policy_id, "company_id": company_id, "chunk_index": idx}]
             )
 
-        # ──── Chunks tayyar — policy ab kaam ki hai ────
-        # `is_active` yahin lag jata hai kyunki Leave Agent isi par chalta
-        # hai. Magar `status` abhi "processing" hi rehta hai — dekhein neeche.
+        # ──── The chunks are ready — the policy is now usable ────
+        # `is_active` is set here because the Leave Agent runs off it. But
+        # `status` stays "processing" for now — see below.
         policy = session.query(CompanyPolicy).filter(CompanyPolicy.id == policy_id).first()
         if policy:
             policy.chunks_indexed = len(chunks)
@@ -666,24 +670,31 @@ def process_policy_document(
 
         print(f"Policy {policy_id} indexed: {len(chunks)} chunks")
 
-        # ──── Ab policy se settings khud nikal kar laga do ────
-        # Do alag agent — ek dusre se mustaqil. Ek fail ho jaye to
-        # doosra phir bhi chalta hai (dono apni ghalti khud sambhalte hain).
+        # ──── Now extract and apply the settings from the policy ────
+        # Two separate agents — independent of each other. If one fails the
+        # other still runs (each handles its own errors).
         extract_and_apply_leave_types(session, company_id, policy_id, text)
 
         wp_summary = extract_and_apply_work_policy(session, company_id, text)
+
+        # ──── The payroll rules from the SAME result ────
+        # One document, one LLM call — it just lands in two different tables
+        pr_summary = extract_and_apply_payroll_rules(
+            session, company_id, wp_summary.pop("_all_fields", None)
+        )
         _save_policy_preview(session, policy_id, "work_policy", wp_summary)
+        _save_policy_preview(session, policy_id, "payroll_rules", pr_summary)
 
         # ══════════════════════════════════════════
-        # SAB SE AAKHIR MEIN status = "active"
+        # status = "active" comes LAST of all
         # ══════════════════════════════════════════
-        # Pehle yeh chunks bante hi lag jata tha — indexing ke fauran baad,
-        # magar agents chalne se PEHLE. UI isi par intezar khatam karti hai,
-        # is liye "Policy indexed!" us waqt aa jata jab leave types aur
-        # working hours abhi lage hi nahi the. CEO ko purani values dikhtin
-        # (ya panel aata hi nahi) aur page reload karna parta.
+        # This used to be set as soon as the chunks existed — right after
+        # indexing, but BEFORE the agents ran. The UI stops waiting on it,
+        # so "Policy indexed!" appeared while the leave types and working
+        # hours had not been applied yet. The CEO saw the old values (or no
+        # panel at all) and had to reload the page.
         #
-        # Ab `status == "active"` ka matlab hai: **sab kuch mukammal**.
+        # Now `status == "active"` means: **everything is complete**.
         policy = session.query(CompanyPolicy).filter(CompanyPolicy.id == policy_id).first()
         if policy:
             policy.status = "active"
@@ -718,7 +729,7 @@ async def upload_policy(
     elif filename.endswith(".docx"):
         file_type = "docx"
     else:
-        raise HTTPException(status_code=400, detail="Sirf PDF ya DOCX upload karo!")
+        raise HTTPException(status_code=400, detail="Please upload a PDF or DOCX only")
 
     upload_dir = os.path.join(os.path.dirname(__file__), "..", "uploads", "policies")
     os.makedirs(upload_dir, exist_ok=True)
@@ -768,7 +779,7 @@ async def upload_policy(
     )
 
     return {
-        "message": "Policy upload ho gayi! Processing...",
+        "message": "Policy uploaded — processing...",
         "policy_id": policy.id,
         "status": "processing"
     }
@@ -783,15 +794,16 @@ def get_policy_status(
 ):
     policy = db.query(CompanyPolicy).filter(CompanyPolicy.id == policy_id).first()
     if not policy:
-        raise HTTPException(status_code=404, detail="Policy nahi mili")
+        raise HTTPException(status_code=404, detail="Policy not found")
 
-    # Purane documents ka preview seedha leave summary tha (bina key ke)
+    # Older documents stored the leave summary directly (with no key)
     preview = policy.policy_preview
     if isinstance(preview, dict) and "leave_types" in preview:
         leave_summary = preview.get("leave_types")
         work_summary = preview.get("work_policy")
+        payroll_summary = preview.get("payroll_rules")
     else:
-        leave_summary, work_summary = preview, None
+        leave_summary, work_summary, payroll_summary = preview, None, None
 
     return {
         "policy_id": policy.id,
@@ -799,9 +811,10 @@ def get_policy_status(
         "chunks_indexed": policy.chunks_indexed,
         "indexed_at": str(policy.indexed_at) if policy.indexed_at else None,
         "is_active": policy.is_active,
-        # ──── Document se khud lagne ka natija ────
+        # ──── What was applied automatically from the document ────
         "leave_types": leave_summary,
         "work_policy": work_summary,
+        "payroll_rules": payroll_summary,
     }
 
 
@@ -826,8 +839,10 @@ def get_active_policy(
     if isinstance(preview, dict) and "leave_types" in preview:
         leave_summary = preview.get("leave_types")
         work_summary = preview.get("work_policy")
+        payroll_summary = preview.get("payroll_rules")
     else:
-        leave_summary, work_summary = preview, None
+        leave_summary = preview
+        work_summary = payroll_summary = None
 
     return {
         "policy": {
@@ -840,20 +855,23 @@ def get_active_policy(
             "effective_from": str(policy.effective_from),
             "created_at": str(policy.created_at),
             "leave_types": leave_summary,
-            # Settings kholte hi Working Hours tab par dikh jata hai ke
-            # kaunsi field document se aayi thi — page reload ke baad bhi
+            # On opening Settings, the Working Hours tab immediately shows
+            # which field came from the document — even after a reload
             "work_policy": work_summary,
+            # The same applies to the Payroll → Rules tab. Without this key
+            # its "from policy" markers never appeared at all.
+            "payroll_rules": payroll_summary,
         }
     }
 
 
-# ──── Route 8b: Sab Policies ki List ────
+# ──── Route 8b: List all policies ────
 @router.get("/policy/list")
 def list_policies(
     db: Session = Depends(get_db),
     current_user: dict = Depends(require_ceo)
 ):
-    """CEO ki company ki sari uploaded policies — nayi pehle"""
+    """Every policy uploaded for the CEO's company — newest first"""
     ceo = db.query(User).filter(User.id == current_user["user_id"]).first()
 
     policies = db.query(CompanyPolicy).filter(
@@ -882,7 +900,7 @@ def list_policies(
     }
 
 
-# ──── Route 8b-2: Purani Policy dobara Activate ────
+# ──── Route 8b-2: Reactivate an earlier policy ────
 @router.post("/policy/{policy_id}/activate")
 def activate_policy(
     policy_id: int,
@@ -891,26 +909,24 @@ def activate_policy(
     current_user: dict = Depends(require_ceo)
 ):
     """
-    Pehle se uploaded policy ko dobara active karo.
+    Reactivate a policy that was uploaded earlier.
 
-    ═══ MASLA KYA THA ═══
-    Nayi policy upload karte hi purani "superseded" ho jati thi. Wapas usi
-    par jane ka koi tareeqa nahi tha — CEO ko wohi file DOBARA upload karni
-    parti thi (nayi version ban jati, indexing phir se hoti) aur purani
-    delete karni parti thi. File to disk par mehfooz padi hai — usay
-    istemal na karna bemaani hai.
+    ═══ WHAT THE PROBLEM WAS ═══
+    Uploading a new policy marked the old one "superseded", with no way to
+    go back — the CEO had to upload the SAME file again (creating a new
+    version and reindexing) and delete the old one. The file is sitting
+    safely on disk — not using it made no sense.
 
     ═══ AB ═══
-    File wahi hai, is liye wohi rasta dobara chalta hai jo upload par chalta
-    hai — `process_policy_document`:
-        chunks banao → ChromaDB dobara index karo (purana collection hata kar)
+    The file is the same, so the same path that runs on upload runs again —
+    `process_policy_document`:
+        build chunks → reindex ChromaDB (dropping the old collection)
         → leave types laagu → working hours laagu
 
-    Yani natija bilkul waisa hi hota hai jaisa us document ko upload karne
-    par hota. Alag rasta banata to dono kabhi na kabhi alag chalne lagte.
+    So the outcome is exactly what uploading that document would produce.
+    A separate path would eventually start behaving differently.
 
-    Purani policies delete NAHI hoti — CEO jab chahe ek se doosri par
-    aa ja sakta hai.
+    Old policies are NOT deleted — the CEO can move between them freely.
     """
     ceo = db.query(User).filter(User.id == current_user["user_id"]).first()
     company_id = ceo.id
@@ -921,32 +937,32 @@ def activate_policy(
     ).first()
 
     if not policy:
-        raise HTTPException(status_code=404, detail="Policy nahi mili")
+        raise HTTPException(status_code=404, detail="Policy not found")
 
     if policy.is_active:
-        raise HTTPException(status_code=400, detail="Yeh policy pehle se active hai")
+        raise HTTPException(status_code=400, detail="This policy is already active")
 
-    # ──── File disk par honi chahiye ────
-    # Bina file ke na chunks ban sakte hain na agent kuch parh sakta hai.
-    # Yahan rok dena behtar hai — warna active to ho jati magar khali.
+    # ──── The file must exist on disk ────
+    # Without it neither the chunks can be built nor can the agent read
+    # anything. Better to stop here — otherwise it goes active but empty.
     if not policy.file_path or not os.path.exists(policy.file_path):
         raise HTTPException(
             status_code=400,
             detail=(
-                "Is policy ki file disk par nahi mili — activate nahi ho sakti. "
-                "Dobara upload karein."
+                "This policy's file was not found on disk — it cannot be "
+                "activated. Please upload it again."
             )
         )
 
     label = policy.policy_label or policy.file_name
 
-    # ──── Baqi sab ko utaar do ────
+    # ──── Stand every other one down ────
     db.query(CompanyPolicy).filter(
         CompanyPolicy.company_id == company_id,
         CompanyPolicy.is_active == True
     ).update({"is_active": False, "status": "superseded"})
 
-    # Purana natija saaf — warna nayi indexing chalte waqt UI purana
+    # Clear the old result — otherwise, while reindexing, the UI shows the old
     # natija dikhata rahega
     policy.status = "processing"
     policy.policy_preview = None
@@ -963,7 +979,7 @@ def activate_policy(
     )
 
     return {
-        "message": f"'{label}' activate ho rahi hai — dobara index ho rahi hai",
+        "message": f"'{label}' is being activated — reindexing now",
         "policy_id": policy.id,
         "status": "processing",
     }
@@ -977,10 +993,10 @@ def delete_policy(
     current_user: dict = Depends(require_ceo)
 ):
     """
-    Policy document delete karo — DB row, file, aur ChromaDB ke chunks.
+    Delete a policy document — the DB row, the file, and the ChromaDB chunks.
 
-    Chunks hatana SAB SE ZAROORI hai: agar sirf DB row delete karein aur
-    vector chunks pade rahein to Leave Agent us hataye hue document se
+    Removing the chunks is the MOST important part: deleting only the DB
+    row while the vector chunks remain would let the Leave Agent keep
     jawab uthata rahega.
     """
     ceo = db.query(User).filter(User.id == current_user["user_id"]).first()
@@ -991,15 +1007,15 @@ def delete_policy(
     ).first()
 
     if not policy:
-        raise HTTPException(status_code=404, detail="Policy nahi mili")
+        raise HTTPException(status_code=404, detail="Policy not found")
 
     was_active = policy.is_active
     file_path = policy.file_path
     label = policy.policy_label or policy.file_name
 
-    # ──── 1. Audit trail bacha lo ────
-    # Purane leave faisle delete NAHI karne — sirf policy ka link hata do,
-    # warna "yeh leave kis policy pe reject hui thi" ka record gum ho jayega
+    # ──── 1. Preserve the audit trail ────
+    # Do NOT delete old leave decisions — just unlink the policy, or the
+    # record of "which policy this leave was rejected under" is lost
     db.query(PolicyDecisionLog).filter(
         PolicyDecisionLog.policy_id == policy_id
     ).update({"policy_id": None}, synchronize_session=False)
@@ -1015,7 +1031,7 @@ def delete_policy(
             chroma_client.delete_collection(f"company_{ceo.id}_policies")
             chunks_removed = True
         except Exception as e:
-            # Collection maujood hi na ho to koi baat nahi
+            # If the collection does not exist, that is fine
             print(f"Chroma collection delete: {e}")
 
     # ──── 3. File ────
@@ -1032,13 +1048,13 @@ def delete_policy(
     db.commit()
 
     return {
-        "message": f"'{label}' delete ho gayi",
+        "message": f"'{label}' deleted",
         "policy_id": policy_id,
         "was_active": was_active,
         "chunks_removed": chunks_removed,
         "file_removed": file_removed,
         "note": (
-            "Ab koi active policy nahi — sari leave requests CEO ke paas jayengi"
+            "There is no active policy now — every leave request will go to the CEO"
             if was_active else None
         ),
     }
@@ -1078,3 +1094,111 @@ def set_override(
     db.add(override)
     db.commit()
     return {"message": "Override set!"}
+
+# ══════════════════════════════════════════════
+# Payroll rules — straight from the policy document
+# ══════════════════════════════════════════════
+PAYROLL_RULE_FIELDS = [
+    "overtime_multiplier",
+    "late_deduction_policy", "late_deduction_amount",
+    "undertime_deduction", "unpaid_leave_deduction", "absent_deduction",
+    "tax_percentage", "tax_threshold", "provident_fund_percent",
+]
+
+
+def _value_changed(previous, new) -> bool:
+    """
+    Kya value waqai badli?
+
+    A plain str() comparison will not do: the DB gives `Decimal("10.00")`
+    and the agent gives `10.0` — the same meaning, different text. That
+    would show the CEO "this changed" every time, even when nothing did.
+    Compare numbers as numbers, everything else as text.
+    """
+    if previous is None:
+        return new is not None
+    try:
+        return Decimal(str(previous)) != Decimal(str(new))
+    except (InvalidOperation, TypeError, ValueError):
+        return str(previous) != str(new)
+
+
+def extract_and_apply_payroll_rules(session, company_id: int, found: dict):
+    """
+    Apply the payroll rules straight from the policy document.
+
+    Exactly the same rule as the working hours:
+      · a field FOUND in the document is applied
+      · one that is NOT found is left alone (the CEO's value stands)
+      · if nothing is found, nothing changes
+
+    ═══ THE LLM IS NOT CALLED AGAIN ═══
+    `found` holds the same fields the working-hours agent extracted.
+    One document, one LLM call — it simply lands in two different tables.
+    Running it again could give a slightly different answer, and
+    two places would end up saying two things.
+    """
+    from app.models.payroll import PayrollPolicy
+
+    summary = {
+        "ran": False, "reason": "", "fields": {}, "skipped": [], "warnings": [],
+    }
+
+    try:
+        mine = {k: v for k, v in (found or {}).items()
+                if k in PAYROLL_RULE_FIELDS}
+
+        if not mine:
+            summary["reason"] = (
+                "No payroll rules were found in the policy document — "
+                "maujooda settings waise hi rehne di gayin"
+            )
+            summary["skipped"] = list(PAYROLL_RULE_FIELDS)
+            print("[policy] payroll rules: nothing found")
+            return summary
+
+        row = session.query(PayrollPolicy).filter(
+            PayrollPolicy.company_id == company_id
+        ).first()
+        if not row:
+            row = PayrollPolicy(company_id=company_id)
+            session.add(row)
+
+        for name in PAYROLL_RULE_FIELDS:
+            if name not in mine:
+                summary["skipped"].append(name)
+                continue
+
+            item = mine[name]
+            previous = getattr(row, name, None)
+            if hasattr(previous, "value"):
+                previous = previous.value
+
+            setattr(row, name, item["value"])
+            summary["fields"][name] = {
+                "value": item["value"],
+                "source_quote": item.get("source_quote", ""),
+                "confidence": item.get("confidence", "low"),
+                "current_value": (float(previous)
+                                  if isinstance(previous, Decimal) else previous),
+                "changes": _value_changed(previous, item["value"]),
+            }
+
+        row.updated_at = datetime.utcnow()
+        session.commit()
+
+        summary["ran"] = True
+        summary["saved"] = True
+        summary["found_count"] = len(summary["fields"])
+        summary["reason"] = (
+            f"{len(summary['fields'])} payroll rule(s) applied from the policy, "
+            f"{len(summary['skipped'])} manual"
+        )
+        print(f"[policy] payroll rules auto-applied: {list(summary['fields'])}")
+
+    except Exception as e:
+        session.rollback()
+        summary["reason"] = f"Problem while extracting the payroll rules: {e}"
+        print(f"[policy] payroll rules failed: {e}")
+
+    return summary

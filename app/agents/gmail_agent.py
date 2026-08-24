@@ -35,7 +35,7 @@ def get_gmail_service():
     return build('gmail', 'v1', credentials=creds)
 
 
-# ──── PDF attachment extract karo ────
+# ──── Extract the PDF attachment ────
 def extract_pdf_from_attachment(service, message_id, attachment_id):
     attachment = service.users().messages().attachments().get(
         userId='me',
@@ -58,7 +58,7 @@ def extract_pdf_from_attachment(service, message_id, attachment_id):
     return cv_text, pdf_bytes
 
 
-# ──── CV se naam extract karo ────
+# ──── Extract the name from the CV ────
 def extract_name_from_cv(cv_text: str, fallback_name: str) -> str:
     if not cv_text:
         return fallback_name
@@ -103,7 +103,7 @@ def extract_name_from_cv(cv_text: str, fallback_name: str) -> str:
     return fallback_name
 
 
-# ──── Emails fetch karo ────
+# ──── Fetch the emails ────
 def fetch_job_application_emails(job_title: str, max_results: int = 20):
     service = get_gmail_service()
 

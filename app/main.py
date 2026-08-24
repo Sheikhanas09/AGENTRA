@@ -4,13 +4,15 @@ from sqlalchemy.orm import Session
 
 from app.database import engine, SessionLocal
 from app.models import user
-from app.models import recruitment  # ← naya
-from app.models import attendance 
-from app.routes import auth, admin, ceo, recruitment as recruitment_routes # ← naya
+from app.models import recruitment 
+from app.models import attendance
+from app.models import payroll  # noqa: F401  (so the tables get registered)
+from app.routes import auth, admin, ceo, recruitment as recruitment_routes
 from app.utils.security import hash_password
 from app.routes import settings as settings_routes
 from app.routes import attendance as attendance_routes
-from app.routes import leave as leave_routes  
+from app.routes import leave as leave_routes
+from app.routes import payroll as payroll_routes
 
 app = FastAPI()
 
@@ -25,7 +27,7 @@ app.add_middleware(
 
 # ──── Tables create ────
 user.Base.metadata.create_all(bind=engine)
-recruitment.Base.metadata.create_all(bind=engine)  # ← naya
+recruitment.Base.metadata.create_all(bind=engine) 
 attendance.Base.metadata.create_all(bind=engine)
 
 
@@ -57,12 +59,12 @@ create_super_admin()
 
 
 # ──── Background scheduler ────
-# Auto-approve aur reminders ab kisi ke app kholne ka intezar nahi karte
+# Auto-approve and reminders no longer wait for someone to open the app
 @app.on_event("startup")
 def start_background_jobs():
     import os
     if os.getenv("SCHEDULER_ENABLED", "true").strip().lower() in ("false", "0", "no"):
-        print("[scheduler] SCHEDULER_ENABLED=false — band hai")
+        print("[scheduler] SCHEDULER_ENABLED=false — disabled")
         return
 
     from app.utils.scheduler import register_jobs
@@ -77,7 +79,7 @@ def stop_background_jobs():
 
 @app.get("/scheduler/status")
 def scheduler_status():
-    """Jobs chal rahe hain ya nahi — debug ke liye"""
+    """Whether the jobs are running — for debugging"""
     from app.utils.scheduler import scheduler
     return {"jobs": scheduler.status()}
 
@@ -86,10 +88,11 @@ def scheduler_status():
 app.include_router(auth.router)
 app.include_router(admin.router)
 app.include_router(ceo.router)
-app.include_router(recruitment_routes.router)  #  naya
+app.include_router(recruitment_routes.router)
 app.include_router(settings_routes.router)
 app.include_router(attendance_routes.router)
-app.include_router(leave_routes.router)   
+app.include_router(leave_routes.router)
+app.include_router(payroll_routes.router)
 
 
 @app.get("/")

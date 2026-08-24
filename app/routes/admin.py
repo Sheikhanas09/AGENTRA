@@ -149,7 +149,7 @@ def rejected_ceos(
     ]
 
 
-# CEO ko reject karo
+# Reject a CEO
 @router.put("/reject-ceo/{ceo_id}")
 def reject_ceo(
     ceo_id: int,
@@ -164,7 +164,7 @@ def reject_ceo(
     return {"message": "The CEO has been rejected."}
 
 
-# CEO manually inactive karo
+# Manually deactivate a CEO
 @router.put("/deactivate-ceo/{ceo_id}")
 def deactivate_ceo(
     ceo_id: int,
@@ -179,7 +179,7 @@ def deactivate_ceo(
     return {"message": "The CEO has been deactivated."}
 
 
-# CEO dobara active karo
+# Reactivate a CEO
 @router.put("/activate-ceo/{ceo_id}")
 def activate_ceo(
     ceo_id: int,
@@ -196,9 +196,9 @@ def activate_ceo(
     return {"message": "The CEO has been activated."}
 
 
-# ──── Yeh naya add hua ────
+# ──── Newly added ────
 
-# CEO delete karo
+# Delete a CEO
 @router.delete("/delete-ceo/{ceo_id}")
 def delete_ceo(
     ceo_id: int,

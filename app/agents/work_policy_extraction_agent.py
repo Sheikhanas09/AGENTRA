@@ -1,34 +1,34 @@
 """
 Work Policy Extraction Agent
 ────────────────────────────
-CEO ki policy document parh kar **working hours** ke fields nikalta hai —
+Reads the CEO's policy document and extracts the **working hours** fields —
 shift timings, working days, late tolerance, overtime, break policy.
 
-Leave types wale agent (`policy_extraction_agent.py`) ka bhai hai: wahi
-3-node shape, wahi lazy LLM/Chroma, wahi "source_quote + confidence" usool.
-Farq sirf yeh hai ke wo LIST nikalta hai, yeh alag alag FIELDS.
+A sibling of the leave-types agent (`policy_extraction_agent.py`): the same
+three-node shape, the same lazy LLM/Chroma, the same "source_quote +
+confidence" rule.
+The only difference is that one extracts a LIST, this one extracts FIELDS.
 
     Policy PDF
         │
-    extract_node   → document ka text (ya ChromaDB ke chunks)
+    extract_node   → the document's text (or the ChromaDB chunks)
         │
-    rag_node       → working hours se mutalliq hisse chunte hain
+    rag_node       → picks the parts that relate to working hours
         │
     llm_node       → {fields: {shift_start: {...}, ...}}
         │
-    settings.py    → sirf wahi fields set hote hain jo MILE
-                     baqi CEO khud bharta hai
+    settings.py    → only the fields that were FOUND are set;
+                     the CEO fills in the rest
 
-═══ SAB SE AHEM USOOL ═══
-Jo field document mein NAHI hai, wo yahan aata hi nahi. Us ki maujooda
-value ko haath nahi lagta — CEO ne jo manually set kiya tha wo waise ka
-waisa rehta hai.
+═══ THE MOST IMPORTANT RULE ═══
+A field that is NOT in the document never arrives here at all. Its current
+value is untouched — whatever the CEO set manually stays exactly as it is.
 
 ═══ AM/PM ═══
-Sab se khatarnak ghalti yehi hai: "5 PM" ka "05:00" ban jana. Poori shift
-ulti ho jati hai aur attendance ka hisaab kharab. Is liye LLM se 24-hour
-value ke SAATH document ka asal lafz (`raw`) bhi mangte hain aur khud
-milaate hain — takraar ho to raw jeetta hai.
+The most dangerous mistake is this: "5 PM" becoming "05:00". The whole
+shift inverts and the attendance figures fall apart. So we ask the LLM for
+the document's own wording (`raw`) ALONGSIDE the 24-hour value and compare
+them ourselves — on a conflict, raw wins.
 """
 
 import json
@@ -42,8 +42,8 @@ from typing import TypedDict
 load_dotenv()
 
 
-# ──── Retrieval ke liye query ────
-# Working hours policy inhi alfaaz mein likhi hoti hai
+# ──── The retrieval query ────
+# This is roughly how a working-hours policy is worded
 RETRIEVAL_QUERY = """
 working hours office timings shift start end time
 working days week Monday Friday Saturday weekend holiday
@@ -59,8 +59,8 @@ TOP_CHUNKS = 8
 DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday",
              "Friday", "Saturday", "Sunday"]
 
-# Warning messages mein aam fehm naam — CEO ko `late_tolerance_mins` nahi
-# padhna chahiye
+# Plain names for the warning messages — the CEO should not have to read
+# `late_tolerance_mins`
 FIELD_LABELS = {
     "shift_start": "Shift start",
     "shift_end": "Shift end",
@@ -73,12 +73,23 @@ FIELD_LABELS = {
     "overtime_threshold": "Overtime threshold",
     "max_overtime_per_day": "Max overtime per day",
     "break_policy": "Break policy",
-    "break_minutes": "Break ki muddat",
+    "break_minutes": "Break duration",
     "break_start": "Break start",
     "break_end": "Break end",
+
+    # ──── Payroll rules (the payroll_policy table) ────
+    "overtime_multiplier": "Overtime multiplier",
+    "late_deduction_policy": "How late arrival is deducted",
+    "late_deduction_amount": "Late arrival deduction",
+    "undertime_deduction": "Short hours deduction",
+    "unpaid_leave_deduction": "Unpaid leave deduction",
+    "absent_deduction": "Absence deduction",
+    "tax_percentage": "Tax %",
+    "tax_threshold": "Tax threshold",
+    "provident_fund_percent": "Provident fund %",
 }
 
-# ──── Har field ki hadd — is se bahar ho to CEO ko warning ────
+# ──── Limits per field — outside these the CEO is warned ────
 INT_LIMITS = {
     "late_tolerance_mins": (0, 240),
     "early_checkin_grace_mins": (0, 720),
@@ -89,6 +100,13 @@ FLOAT_LIMITS = {
     "min_daily_hours": (0.5, 24.0),
     "overtime_threshold": (0.5, 24.0),
     "max_overtime_per_day": (0.0, 12.0),
+
+    # ──── Payroll ────
+    "overtime_multiplier": (0.0, 10.0),
+    "tax_percentage": (0.0, 100.0),
+    "provident_fund_percent": (0.0, 100.0),
+    "late_deduction_amount": (0.0, 1_000_000.0),
+    "tax_threshold": (0.0, 100_000_000.0),
 }
 
 
@@ -102,25 +120,25 @@ class WorkPolicyState(TypedDict):
 
 
 # ══════════════════════════════════════════════
-# Node 1: Document ka text
+# Node 1: The document's text
 # ══════════════════════════════════════════════
 def extract_node(state: WorkPolicyState) -> WorkPolicyState:
-    """Caller ne poora text diya ho to wahi, warna chunks pe guzara"""
+    """Use the caller's full text if given, otherwise make do with chunks"""
     return {**state, "policy_text": (state.get("policy_text") or "").strip()}
 
 
 # ══════════════════════════════════════════════
-# Node 2: RAG — working hours wale hisse
+# Node 2: RAG — the working-hours sections
 # ══════════════════════════════════════════════
 def rag_node(state: WorkPolicyState) -> WorkPolicyState:
     """
-    ChromaDB se timings se mutalliq chunks nikalo.
+    Pull the timing-related chunks out of ChromaDB.
 
-    Poora document dena mehnga bhi hai aur natija bhi kharab — leave
-    ki tafseel aur dress code beech mein aa kar dhyan bata dete hain.
+    Handing over the whole document is both expensive and worse — leave
+    details and dress codes get in the way and distract it.
     """
     try:
-        # Lazy import — GROQ key na ho to bhi module load ho jaye
+        # Lazy import — the module should load even without a GROQ key
         from app.agents.leave_agent import get_chroma_client, get_embedding_model
 
         collection = get_chroma_client().get_or_create_collection(
@@ -150,7 +168,7 @@ def rag_node(state: WorkPolicyState) -> WorkPolicyState:
 
 
 # ══════════════════════════════════════════════
-# Node 3: LLM — fields nikalo
+# Node 3: LLM — extract the fields
 # ══════════════════════════════════════════════
 PROMPT = """You are an HR policy analyst. Read the company policy below and
 extract its WORKING HOURS configuration.
@@ -214,8 +232,107 @@ Respond ONLY with JSON in this shape (omit fields not found):
 }}"""
 
 
+# ══════════════════════════════════════════════
+# Payroll rules — a SEPARATE call
+# ══════════════════════════════════════════════
+# These 8 fields used to live in the prompt above. The result: on
+# llama-3.1-8b the field list grew so long that the model started dropping
+# older ones — `leave_auto_approve_hours` vanished entirely, even though it
+# was stated plainly in the document ("within 48 hours ... deemed approved").
+#
+# A small model cannot hold that many things at once. So: two separate,
+# smaller calls — each with a single job. The document is still just ONE;
+# both calls run over the same text.
+PAYROLL_PROMPT = """You are an HR policy analyst. Read the company policy below
+and extract its PAYROLL rules.
+
+=== COMPANY POLICY ===
+{policy}
+=== END POLICY ===
+
+Extract ONLY these fields, and ONLY if the policy actually states them:
+
+- overtime_multiplier: the rate multiplier for overtime pay (e.g. 1.5 for
+  "one and a half times", 2 for "double the rate").
+- late_deduction_policy: how lateness is deducted.
+  "pro_rata"       - the deduction is proportional to the time missed,
+                     i.e. calculated from the employee's own salary for
+                     the minutes/hours they were late. No fixed amount.
+  "per_occurrence" - a FIXED amount (e.g. "PKR 500 fine per late arrival")
+                     regardless of how late.
+  "per_minute"     - a FIXED amount for EACH late minute (e.g. "PKR 10
+                     per minute late").
+  "none"           - lateness carries no salary deduction.
+- late_deduction_amount: the fixed amount, ONLY for "per_occurrence" or
+  "per_minute". Omit it for "pro_rata" — there is no fixed amount there.
+- undertime_deduction: "pro_rata" if salary is deducted for working fewer
+  hours than required, "none" otherwise.
+- absent_deduction: how an UNAUTHORISED absence is treated — a day the
+  employee neither attended nor had approved leave for.
+  "per_day" - one full day's salary is deducted for each absent day.
+  "none"    - no salary deduction for absence.
+  This is NOT the same as unpaid leave, where the employee did apply and
+  was approved.
+- unpaid_leave_deduction: "pro_rata" if unpaid leave days are deducted from
+  salary, "none" otherwise.
+- tax_percentage: income tax rate applied to salary.
+- tax_threshold: the amount BELOW which no tax applies (tax is charged only
+  on the portion above it).
+- provident_fund_percent: provident fund contribution rate.
+
+For EVERY field you report, include:
+  source_quote: the EXACT sentence from the policy it came from. Do not
+                paraphrase. This is how a human verifies you.
+  confidence:   "high" if the policy states it plainly, "low" if inferred.
+
+CRITICAL RULES:
+- OMIT any field the policy does not mention. Do NOT guess.
+- Do NOT fill in values from your general knowledge of payroll norms.
+- An empty result is a correct answer if the policy has no payroll rules.
+- Never invent a source_quote. If you cannot quote it, omit the field.
+
+Respond ONLY with JSON in this shape (omit fields not found):
+{{
+  "overtime_multiplier": {{"value": 1.5,
+                    "source_quote": "Overtime is paid at 1.5 times the rate.",
+                    "confidence": "high"}},
+  "tax_percentage": {{"value": 5,
+                    "source_quote": "Income tax of 5% is deducted at source.",
+                    "confidence": "high"}}
+}}"""
+
+# Which field comes from which call
+PAYROLL_PROMPT_FIELDS = {
+    "overtime_multiplier",
+    "late_deduction_policy", "late_deduction_amount",
+    "undertime_deduction", "unpaid_leave_deduction", "absent_deduction",
+    "tax_percentage", "tax_threshold", "provident_fund_percent",
+}
+
+
+def _ask_llm(llm, prompt: str, policy: str) -> dict:
+    """One LLM call → a parsed JSON dict (empty dict if nothing is found)"""
+    response = llm.invoke([
+        SystemMessage(
+            content="You extract structured HR data. Respond with valid JSON only. "
+                    "Never invent information that is not in the provided text. "
+                    "Omitting a field is always better than guessing it."
+        ),
+        HumanMessage(content=prompt.format(policy=policy)),
+    ])
+
+    raw = response.content.strip()
+    if "```json" in raw:
+        raw = raw.split("```json")[1].split("```")[0].strip()
+    elif "```" in raw:
+        raw = raw.split("```")[1].split("```")[0].strip()
+
+    parsed = json.loads(raw)
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def llm_node(state: WorkPolicyState) -> WorkPolicyState:
-    """Chunks LLM ko do, JSON wapas lo, phir usay bharose ke qabil banao"""
+    """Give the chunks to the LLM, take the JSON back, then make it trustworthy"""
     policy = state.get("policy_text") or ""
 
     if not policy and state.get("retrieved_chunks"):
@@ -228,7 +345,7 @@ def llm_node(state: WorkPolicyState) -> WorkPolicyState:
         return {
             **state,
             "fields": {},
-            "warnings": ["Policy document mein working hours se mutalliq kuch nahi mila"],
+            "warnings": ["Nothing about working hours was found in the policy document"],
         }
 
     policy = policy[:12000]
@@ -236,40 +353,39 @@ def llm_node(state: WorkPolicyState) -> WorkPolicyState:
     try:
         from app.agents.leave_agent import get_llm
 
-        response = get_llm().invoke([
-            SystemMessage(
-                content="You extract structured HR data. Respond with valid JSON only. "
-                        "Never invent information that is not in the provided text. "
-                        "Omitting a field is always better than guessing it."
-            ),
-            HumanMessage(content=PROMPT.format(policy=policy)),
-        ])
+        llm = get_llm()
+        parsed = _ask_llm(llm, PROMPT, policy)
 
-        raw = response.content.strip()
-        if "```json" in raw:
-            raw = raw.split("```json")[1].split("```")[0].strip()
-        elif "```" in raw:
-            raw = raw.split("```")[1].split("```")[0].strip()
+        # ──── Second call: the payroll rules ────
+        # Letting this one fail is acceptable — the working hours matter
+        # more, and if the payroll rules are not found the CEO's existing
+        # settings simply stay as they are.
+        try:
+            pay = _ask_llm(llm, PAYROLL_PROMPT, policy)
+            for name, item in pay.items():
+                if name in PAYROLL_PROMPT_FIELDS:
+                    parsed[name] = item
+        except Exception as e:
+            print(f"[work-policy] the payroll-rules call failed: {e}")
 
-        parsed = json.loads(raw)
         fields, warnings = _sanitize(parsed)
 
-        # ──── Har field ka hawala document mein maujood hai? ────
+        # ──── Does each field's quote actually exist in the document? ────
         kept, quote_warnings = _verify_quotes(fields, policy)
 
-        # ──── Shift ki jodi — sust hawale ki wajah se na giray ────
+        # ──── The shift pair — do not lose it to a lazy quote ────
         kept, quote_warnings = _rescue_shift_pair(
             fields, kept, policy, quote_warnings
         )
 
-        # ──── Table rows sab par bhaari — yeh sab se aakhir mein ────
+        # ──── Table rows outrank everything — so they run last ────
         kept, quote_warnings = _apply_labeled_times(kept, policy, quote_warnings)
         kept, quote_warnings = _apply_labeled_break(kept, policy, quote_warnings)
 
         warnings.extend(quote_warnings)
         fields = kept
 
-        # ──── Ab jo fields bachi hain, wo aapas mein mel khati hain? ────
+        # ──── Do the surviving fields agree with one another? ────
         warnings.extend(_cross_check(fields))
 
         return {**state, "fields": fields, "warnings": warnings, "error": ""}
@@ -279,32 +395,32 @@ def llm_node(state: WorkPolicyState) -> WorkPolicyState:
         return {
             **state,
             "fields": {},
-            "warnings": ["Agent policy parh nahi paya — working hours manually set karein"],
+            "warnings": ["The agent could not read the policy — set the working hours manually"],
             "error": str(e),
         }
 
 
 # ══════════════════════════════════════════════
-# Time parsing — sab se nazuk hissa
+# Time parsing — the most delicate part
 # ══════════════════════════════════════════════
 def parse_time_value(value, raw="") -> tuple:
     """
-    LLM ki time value ko "HH:MM" (24-hour) banao.
+    Turn the LLM's time value into "HH:MM" (24-hour).
 
     ═══ AM/PM KI GHALTI ═══
-    Yehi wo ghalti hai jo poori shift ulti kar deti hai: "5 PM" ka
-    "05:00" ban jana. Attendance phir 5 baje SUBAH shuru maanti hai.
+    This is the mistake that inverts a whole shift: "5 PM" becoming
+    "05:00". Attendance then believes the day starts at 5 in the MORNING.
 
-    Is liye LLM se document ka asal lafz (`raw`) bhi mangte hain. Agar
-    raw mein "pm" likha ho aur value 12 se kam ghanta de rahi ho, to
-    RAW jeetta hai — document sach hai, LLM ka conversion nahi.
+    So we also ask the LLM for the document's own wording (`raw`). If raw
+    says "pm" while the value gives an hour below 12, RAW wins — the
+    document is the truth, not the LLM's conversion.
 
     Return: (hhmm_string | None, warning | None)
     """
     text = str(value or "").strip()
     raw_text = str(raw or "").strip().lower()
 
-    # ──── Pehle value se ghanta/minute nikalo ────
+    # ──── First take the hour/minute out of the value ────
     m = re.search(r"(\d{1,2})\s*[:.\s]\s*(\d{2})", text)
     if m:
         hour, minute = int(m.group(1)), int(m.group(2))
@@ -315,11 +431,11 @@ def parse_time_value(value, raw="") -> tuple:
         hour, minute = int(m.group(1)), 0
 
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
-        return None, f"'{value}' waqt samajh nahi aaya"
+        return None, f"'{value}' could not be read as a time"
 
     warning = None
 
-    # ──── Value mein khud AM/PM likha ho ────
+    # ──── The value itself may carry AM/PM ────
     combined = f"{text} {raw_text}".lower()
     has_pm = bool(re.search(r"\bp\.?\s?m\.?", combined))
     has_am = bool(re.search(r"\ba\.?\s?m\.?", combined))
@@ -332,19 +448,19 @@ def parse_time_value(value, raw="") -> tuple:
             hour = 0                         # 12 AM → 00
         elif hour > 12:
             warning = (
-                f"Document mein '{raw or value}' likha hai magar agent ne "
-                f"{hour}:{minute:02d} nikala — khud dekh lein"
+                f"The document says '{raw or value}' but the agent read it "
+                f"as {hour}:{minute:02d} — please check"
             )
 
     return f"{hour:02d}:{minute:02d}", warning
 
 
 def _normalize_days(value) -> tuple:
-    """Din ke naam theek karo — "mon", "MONDAY", "Mondays" sab chalein"""
+    """Normalise day names — "mon", "MONDAY", "Mondays" should all work"""
     if isinstance(value, str):
         value = re.split(r"[,;/]|\band\b", value)
     if not isinstance(value, list):
-        return None, "Working days ki list samajh nahi aayi"
+        return None, "The list of working days could not be understood"
 
     lookup = {d.lower(): d for d in DAY_NAMES}
     lookup.update({d[:3].lower(): d for d in DAY_NAMES})
@@ -358,27 +474,27 @@ def _normalize_days(value) -> tuple:
             days.append(match)
 
     if not days:
-        return None, "Working days mein koi pehchana hua din nahi mila"
+        return None, "No recognisable day was found in the working days"
 
-    # Hafte ki tarteeb mein rakho — UI isi tarteeb mein dikhata hai
+    # Keep them in week order — that is the order the UI displays
     return [d for d in DAY_NAMES if d in seen], None
 
 
 def _sanitize(parsed) -> tuple:
     """
-    LLM ke jawab ko qabil-e-etemad banao.
+    Make the LLM's answer trustworthy.
 
-    Har field alag qisam ka hai, is liye har ek ka apna hisaab. Jo
-    field samajh na aaye wo CHUP CHAAP GIR jati hai (galat value
-    lagane se behtar hai ke CEO khud bhar de).
+    Each field is a different kind of thing, so each gets its own handling.
+    A field that cannot be understood is DROPPED SILENTLY (better that the
+    CEO fills it in than that a wrong value is applied).
     """
     fields, warnings = {}, []
 
     if not isinstance(parsed, dict):
-        return {}, ["Agent ka jawab samajh nahi aaya"]
+        return {}, ["The agent's answer could not be understood"]
 
     def entry(name):
-        """Field ka {value, source_quote, confidence} nikalo"""
+        """Pull out a field's {value, source_quote, confidence}"""
         item = parsed.get(name)
         if item is None:
             return None
@@ -394,10 +510,10 @@ def _sanitize(parsed) -> tuple:
         if confidence not in ("high", "low"):
             confidence = "low"
 
-        # ──── Bina hawale ke tajweez par bharosa kam ────
+        # ──── A suggestion without a quote is trusted less ────
         if not quote:
             confidence = "low"
-            warnings.append(f"{name}: document se koi line quote nahi hui")
+            warnings.append(f"{name}: no line was quoted from the document")
 
         fields[name] = {
             "value": value,
@@ -435,15 +551,15 @@ def _sanitize(parsed) -> tuple:
         try:
             num = int(float(item["value"]))
         except (TypeError, ValueError):
-            warnings.append(f"{name}: '{item['value']}' adad nahi hai — chhor diya")
+            warnings.append(f"{name}: '{item['value']}' is not a number — skipped")
             continue
         note = None
         if not lo <= num <= hi:
-            note = f"{name}: {num} hadd se bahar hai ({lo}–{hi}) — check karein"
+            note = f"{name}: {num} is outside the range ({lo}–{hi}) — please check"
             num = max(lo, min(num, hi))
         record(name, num, item, note)
 
-    # ──── Ghante (decimal) ────
+    # ──── Hours (decimal) ────
     for name, (lo, hi) in FLOAT_LIMITS.items():
         item = entry(name)
         if not item:
@@ -451,11 +567,11 @@ def _sanitize(parsed) -> tuple:
         try:
             num = round(float(item["value"]), 2)
         except (TypeError, ValueError):
-            warnings.append(f"{name}: '{item['value']}' adad nahi hai — chhor diya")
+            warnings.append(f"{name}: '{item['value']}' is not a number — skipped")
             continue
         note = None
         if not lo <= num <= hi:
-            note = f"{name}: {num} hadd se bahar hai ({lo}–{hi}) — check karein"
+            note = f"{name}: {num} is outside the range ({lo}–{hi}) — please check"
             num = max(lo, min(num, hi))
         record(name, num, item, note)
 
@@ -468,7 +584,55 @@ def _sanitize(parsed) -> tuple:
         elif text in ("excluded", "exclude", "unpaid", "deducted", "not counted"):
             record("break_policy", "excluded", item)
         else:
-            warnings.append(f"break_policy: '{item['value']}' samajh nahi aaya")
+            warnings.append(f"break_policy: '{item['value']}' could not be understood")
+
+    # ──── The word-based payroll decisions ────
+    item = entry("late_deduction_policy")
+    if item:
+        text = str(item["value"]).strip().lower().replace(" ", "_")
+        # pro_rata first — "prorata" used to fall through to `per_minute`,
+        # which is a different thing: with per_minute the CEO configures an
+        # amount, with pro_rata the deduction comes from the employee's own
+        # salary
+        if text in ("pro_rata", "prorata", "proportional", "salary_based",
+                    "hourly", "per_hour", "pro_rata_salary"):
+            record("late_deduction_policy", "pro_rata", item)
+        elif text in ("per_occurrence", "per_instance", "per_time", "fixed",
+                      "flat", "fine"):
+            record("late_deduction_policy", "per_occurrence", item)
+        elif text in ("per_minute", "per_min"):
+            record("late_deduction_policy", "per_minute", item)
+        elif text in ("none", "no", "nil"):
+            record("late_deduction_policy", "none", item)
+        else:
+            warnings.append(f"late_deduction_policy: '{item['value']}' could not be understood")
+
+    for name in ("undertime_deduction", "unpaid_leave_deduction"):
+        item = entry(name)
+        if not item:
+            continue
+        text = str(item["value"]).strip().lower().replace(" ", "_")
+        if text in ("pro_rata", "prorata", "proportional", "yes", "deducted"):
+            record(name, "pro_rata", item)
+        elif text in ("none", "no", "nil", "not_deducted"):
+            record(name, "none", item)
+        else:
+            warnings.append(f"{name}: '{item['value']}' could not be understood")
+
+    # ──── Absence ────
+    # Its value is "per_day", not "pro_rata" — but the LLM often treats
+    # them as the same thing, and the meaning is in fact the same (one day
+    # absent = one day's pay). So both are accepted.
+    item = entry("absent_deduction")
+    if item:
+        text = str(item["value"]).strip().lower().replace(" ", "_")
+        if text in ("per_day", "perday", "pro_rata", "prorata", "daily",
+                    "full_day", "yes", "deducted", "proportional"):
+            record("absent_deduction", "per_day", item)
+        elif text in ("none", "no", "nil", "not_deducted"):
+            record("absent_deduction", "none", item)
+        else:
+            warnings.append(f"absent_deduction: '{item['value']}' could not be understood")
 
     # ──── Boolean ────
     item = entry("enforce_shift_window")
@@ -478,8 +642,8 @@ def _sanitize(parsed) -> tuple:
             value = value.strip().lower() in ("true", "yes", "1")
         record("enforce_shift_window", bool(value), item)
 
-    # Cross-check yahan NAHI — pehle hawale ki tasdeeq hoti hai, warna
-    # us field par warning aati jo aage chal kar gir hi jani thi
+    # The cross-check is NOT here — the quotes are verified first, or a
+    # warning would be raised on a field that was about to be dropped anyway
     return fields, warnings
 
 
@@ -491,21 +655,60 @@ NUMBER_WORDS = {
     60: "sixty", 90: "ninety",
 }
 
-# Jin fields ki value adad nahi — inka saboot lafzon mein hota hai
+# Fields whose value is not a number — their evidence lives in words
 KEYWORD_EVIDENCE = {
     "break_policy": r"break|lunch|meal|prayer|rest\b",
     "enforce_shift_window": r"check.?in|attendance|clock.?in|shift (?:end|hour|time)",
     "working_days": r"monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
                     r"weekday|weekend|working day|week\b",
+
+    # ──── The payroll enum rules ────
+    # These are words, not numbers — "per_minute" has no digit to look for
+    # inside a quote. Without these, `_has_evidence` simply returned True
+    # for them, meaning the LLM could back all three with any line at all.
+    # The very mistake that happened with the working hours.
+    # All three are DEDUCTION rules, so the sentence must carry TWO things:
+    # the subject (late / undertime / unpaid leave) AND the fact that money
+    # is deducted for it. One alone is not enough:
+    #
+    #   · subject only  → "arrival after 9:50 AM is recorded as late"
+    #     that is only about recording; deduction is not mentioned at all —
+    #     yet the LLM filled late_deduction_policy = per_occurrence from it.
+    #   · deduction only → "All deductions are made at the end of the month"
+    #     one generic sentence would fill all three rules.
+    #
+    # And "unpaid" alone will not do either: "the lunch break is unpaid" is
+    # not about unpaid LEAVE. Otherwise the CEO's "pro_rata" would quietly
+    # become "none" — switching off the unpaid-leave deduction entirely.
+    "late_deduction_policy":
+        r"(?s)(?=.*(?:late|tardy|delayed arrival))"
+        r"(?=.*(?:deduct|fine|penalt|forfeit|cut from|salary|wage|pay\b))",
+    "undertime_deduction":
+        r"(?s)(?=.*(?:under.?time|short(?:er)? (?:hour|time)|fewer hour|"
+        r"less than the required|incomplete hour|kam ghant))"
+        r"(?=.*(?:deduct|pro.?rata|forfeit|cut from|salary|wage|pay\b))",
+    "unpaid_leave_deduction":
+        r"(?s)(?=.*(?:unpaid leave|leave without pay|\blwp\b|"
+        r"unpaid absence|unpaid day))"
+        r"(?=.*(?:deduct|pro.?rata|forfeit|cut from|salary|wage|pay\b))",
+
+    # Absence — the same two-part rule. Here the subject is "absence" but
+    # NOT "unpaid leave": that is a separate rule (the person gave notice).
+    # So "leave" words are deliberately excluded, or a sentence about
+    # unpaid leave would fill this field too.
+    "absent_deduction":
+        r"(?s)(?=.*(?:absent|absence|absenteeism|no.?show|"
+        r"unauthorised absence|unauthorized absence|without notification))"
+        r"(?=.*(?:deduct|forfeit|cut from|salary|wage|unpaid|pay\b))",
 }
 
 
 def _times_in(text: str) -> list:
     """
-    Text mein se waqt jaise tokens nikalo → ["09:30", "18:30"]
+    Pull time-like tokens out of the text → ["09:30", "18:30"]
 
-    "15 days" waqt nahi hai — is liye ya to ":" hona chahiye ya AM/PM.
-    Sirf adad ko waqt maan lena sab se badi ghalat-fehmi hoti.
+    "15 days" is not a time — so there must be either a ":" or an AM/PM.
+    Treating a bare number as a time would be the biggest misreading of all.
     """
     found = []
     pattern = r"\b(\d{1,2})(?:[:.](\d{2}))?\s*(a\.?\s?m\.?|p\.?\s?m\.?)?"
@@ -530,11 +733,11 @@ def _times_in(text: str) -> list:
 
 def _has_evidence(name: str, value, text: str) -> bool:
     """
-    Is text mein is field ki value ka SABOOT hai?
+    Does this text contain EVIDENCE for this field's value?
 
-    Yani: shift_start = "09:30" kehne wali line mein 9:30 likha hona
-    chahiye. "Annual leave: 15 days" wali line 9:30 ka hawala nahi ban sakti,
-    chahe wo document mein maujood hi kyun na ho.
+    That is: a line said to prove shift_start = "09:30" must contain 9:30.
+    A line reading "Annual leave: 15 days" cannot be a citation for 9:30,
+    no matter how genuinely it appears in the document.
     """
     low = text.lower()
 
@@ -544,11 +747,11 @@ def _has_evidence(name: str, value, text: str) -> bool:
     if name in KEYWORD_EVIDENCE:
         return bool(re.search(KEYWORD_EVIDENCE[name], low))
 
-    # ──── Baqi sab adad hain ────
+    # ──── Everything else is a number ────
     try:
         num = float(value)
     except (TypeError, ValueError):
-        return True                       # jis ka hisaab nahi, usay chhor do
+        return True                       # nothing to check, so let it pass
 
     whole = int(num)
     if abs(num - whole) < 0.001:
@@ -563,32 +766,33 @@ def _has_evidence(name: str, value, text: str) -> bool:
 
 def _verify_quotes(fields, policy_text: str) -> tuple:
     """
-    Har field ka hawala WAQAI document mein hai? Na ho to field gir jati hai.
+    Is each field's quote REALLY in the document? If not, the field is dropped.
 
-    ═══ YEH SAB SE ZAROORI GUARD HAI ═══
-    LLM se saaf kaha jata hai ke "jo document mein na ho wo mat batao",
-    magar wo phir bhi apni HR maloomat se bhar deta hai. Test mein sirf
-    LEAVE ki policy di gayi thi — jis mein timings ka zikr tak nahi tha —
-    aur agent ne pura "09:00 – 17:00, Monday–Friday, 15 min tolerance"
-    bana kar de diya. Wo seedha CEO ki asli shift par chal jata.
+    ═══ THIS IS THE MOST IMPORTANT GUARD ═══
+    The LLM is told plainly "do not report anything not in the document",
+    and fills it in from its own HR knowledge anyway. In testing it was
+    given a LEAVE-only policy — with no mention of timings at all — and the
+    agent produced a complete "09:00 – 17:00, Monday–Friday, 15 min
+    tolerance". That would have gone straight onto the CEO's real shift.
 
-    Prompt se yeh nahi ruk sakta. Magar jhoothi value ka hawala bhi
-    jhootha hota hai — aur wo CHECK ho sakta hai. Quote document mein
-    milta hai to value document se aayi hai.
+    A prompt cannot stop this. But a fabricated value has a fabricated
+    citation — and that CAN be checked. If the quote is found in the
+    document, the value came from the document.
 
-    Do sawaal — dono ka jawab haan hona chahiye:
+    Two questions — both must be answered yes:
 
-      1. Quote WAQAI document mein hai?
-      2. Us quote mein value ka SABOOT hai? (aur document mein bhi)
+      1. Is the quote REALLY in the document?
+      2. Does that quote contain EVIDENCE for the value? (and the document too)
 
-    Sirf pehla sawaal kaafi nahi. Test mein agent ne leave wali asli line
-    quote ki — "Annual leave: 15 days per calendar year" — aur us ke sahare
-    shift_start = 09:00 bhej diya. Line sachi thi, value man-gharat.
+    The first question alone is not enough. In testing the agent quoted a
+    genuine leave line — "Annual leave: 15 days per calendar year" — and on
+    the strength of it sent shift_start = 09:00. The line was true, the
+    value invented.
 
-    Quote milne ke teen darje:
+    Three degrees of a quote matching:
       • hu-ba-hu mila                 → rehne do
-      • zyada tar alfaaz mil gaye     → rehne do magar confidence low
-      • nahi mila                     → HATA do (CEO khud bharega)
+      • most of the words matched     → keep it, but with low confidence
+      • not found                     → DROP it (the CEO will fill it in)
     """
     if not policy_text:
         return fields, []
@@ -605,17 +809,17 @@ def _verify_quotes(fields, policy_text: str) -> tuple:
         label = FIELD_LABELS.get(name, name)
 
         if not quote:
-            warnings.append(f"{label}: document se koi line quote nahi hui — nahi lagayi")
+            warnings.append(f"{label}: no line was quoted from the document — not applied")
             continue
 
-        # ──── Sawaal 2 pehle: saboot hai ya nahi ────
-        # Document mein bhi dekhte hain — agent quote ke aakhir mein apni
-        # banayi hui line jor deta hai, jo document mein hoti hi nahi
+        # ──── Question 2 first: is there evidence? ────
+        # The document is checked too — the agent sometimes appends its own
+        # invented line to the end of a quote, one the document never had
         if not (_has_evidence(name, item["value"], raw_quote)
                 and _has_evidence(name, item["value"], policy_text)):
             warnings.append(
-                f"{label}: jo line quote hui us mein is value ka zikr hi nahi — "
-                f"nahi lagayi"
+                f"{label}: the quoted line does not mention this value at "
+                f"all — not applied"
             )
             continue
 
@@ -623,7 +827,7 @@ def _verify_quotes(fields, policy_text: str) -> tuple:
             kept[name] = item
             continue
 
-        # ──── Halka sa paraphrase — sab se lamba mushtarak silsila dekho ────
+        # ──── A light paraphrase — look at the longest common run ────
         words = [w for w in quote.split() if w]
         longest = 0
         for start in range(len(words)):
@@ -636,22 +840,22 @@ def _verify_quotes(fields, policy_text: str) -> tuple:
             item["confidence"] = "low"
             kept[name] = item
             warnings.append(
-                f"{FIELD_LABELS.get(name, name)}: hawala document se poora "
-                f"nahi milta — khud dekh lein"
+                f"{FIELD_LABELS.get(name, name)}: the citation does not fully "
+                f"match the document — please check"
             )
         else:
             warnings.append(
-                f"{FIELD_LABELS.get(name, name)}: jo line quote hui wo document "
-                f"mein hai hi nahi — yeh value nahi lagayi gayi"
+                f"{FIELD_LABELS.get(name, name)}: the quoted line is not in the "
+                f"document at all — this value was not applied"
             )
 
     return kept, warnings
 
 
 # ══════════════════════════════════════════════
-# Labeled rows — policy ka sab se saaf bayan
+# Labeled rows — the policy's clearest statement
 # ══════════════════════════════════════════════
-# Asli policies mein aksar ek summary table hota hai:
+# Real policies often contain a summary table:
 #
 #     Start of Work            09:00 AM
 #     Grace Period             09:00 AM – 09:15 AM
@@ -659,12 +863,12 @@ def _verify_quotes(fields, policy_text: str) -> tuple:
 #     End of Work              07:00 PM
 #     Total Shift Duration     9 Hours
 #
-# "End of Work 07:00 PM" is document ka sab se saaf bayan hai — LLM ki
-# chuni hui koi bhi jumla us se behtar nahi ho sakta. Magar LLM aksar
-# aas paas ki prose line uthata hai (aur table ki qadar nahi karta).
+# "End of Work 07:00 PM" is the clearest statement in the document — no
+# sentence the LLM picks can beat it. But the LLM usually grabs a nearby
+# prose line instead (it does not value tables).
 #
-# Is liye yeh check LLM se BAHAR hai — seedha document par regex. Jo
-# yahan mile wo LLM ke jawab par bhaari hai.
+# So this check sits OUTSIDE the LLM — a regex straight over the document.
+# Whatever it finds outranks the LLM's answer.
 START_LABEL = re.compile(
     r"start(?:ing)?\s*(?:of\s*)?(?:work|shift|time|duty|day)"
     r"|shift\s*start|work(?:ing)?\s*(?:day\s*)?(?:begins|starts)"
@@ -681,16 +885,16 @@ END_LABEL = re.compile(
 
 def _labeled_times(policy_text: str) -> dict:
     """
-    Document mein "<label> <waqt>" wali rows dhoondo.
+    Find "<label> <time>" rows in the document.
 
-    Shart: line mein label ho AUR THEEK EK waqt ho. Do waqt wali line
-    (jaise "Grace Period 09:00 AM – 09:15 AM") field assignment nahi,
-    range hai — usay chhor dete hain.
+    The condition: the line must carry the label AND EXACTLY ONE time. A
+    line with two times (like "Grace Period 09:00 AM – 09:15 AM") is a
+    range, not a field assignment — it is skipped.
 
-    Ek hi label do alag waqt de raha ho to kuch wapas nahi karte —
-    document khud confused hai, hum us par faisla nahi kar sakte.
+    If one label gives two different times, nothing is returned — the
+    document contradicts itself and we cannot decide for it.
 
-    Return: {"shift_start": (hhmm, line), ...}  — sirf saaf soorat mein
+    Return: {"shift_start": (hhmm, line), ...}  — only when unambiguous
     """
     found = {"shift_start": {}, "shift_end": {}}
 
@@ -705,7 +909,7 @@ def _labeled_times(policy_text: str) -> dict:
 
     out = {}
     for name, hits in found.items():
-        if len(hits) == 1:                      # ek hi jawab — saaf hai
+        if len(hits) == 1:                      # a single answer — unambiguous
             value, line = next(iter(hits.items()))
             out[name] = (value, line)
     return out
@@ -720,14 +924,14 @@ BREAK_LABEL = re.compile(
 
 def _labeled_break(policy_text: str) -> tuple:
     """
-    Break ki row dhoondo — magar yahan do waqt hote hain, ek nahi.
+    Find the break row — but here there are two times, not one.
 
         Lunch Break              01:00 PM – 02:00 PM
 
-    Is liye `_labeled_times()` (jo theek EK waqt maangta hai) ise pakad
-    nahi sakta. Break aik RANGE hai, single field nahi.
+    So `_labeled_times()` (which demands exactly ONE time) cannot catch it.
+    A break is a RANGE, not a single field.
 
-    Ek hi label do alag range de raha ho to kuch wapas nahi karte.
+    If one label gives two different ranges, nothing is returned.
 
     Return: (start, end, line) ya None
     """
@@ -749,11 +953,12 @@ def _labeled_break(policy_text: str) -> tuple:
 
 def _apply_labeled_break(fields, policy_text: str, warnings: list) -> tuple:
     """
-    Break ki row mile to wohi chalti hai — aur muddat usi se nikalti hai.
+    If the break row is found it wins — and the duration is derived from it.
 
-    `break_minutes` LLM se alag bhi aa sakti hai, magar do jagah rakhi hui
-    muddat kabhi na kabhi waqt se alag ho jati hai ("1 hour" likha ho magar
-    range 45 minute ki nikle). Waqt maujood ho to muddat hamesha usi se.
+    `break_minutes` may also arrive separately from the LLM, but a duration
+    stored in two places eventually disagrees with the times ("1 hour"
+    written while the range is 45 minutes). When the times exist, the
+    duration always comes from them.
     """
     if not policy_text:
         return fields, warnings
@@ -780,7 +985,7 @@ def _apply_labeled_break(fields, policy_text: str, warnings: list) -> tuple:
 
 
 def _minutes_between(start: str, end: str) -> int:
-    """'13:00' se '14:00' = 60. Aadhi raat paar ho to bhi theek."""
+    """'13:00' to '14:00' = 60. Correct even across midnight."""
     s = int(start[:2]) * 60 + int(start[3:5])
     e = int(end[:2]) * 60 + int(end[3:5])
     return (e - s) if e >= s else (24 * 60 - s + e)
@@ -788,11 +993,11 @@ def _minutes_between(start: str, end: str) -> int:
 
 def _apply_labeled_times(fields, policy_text: str, warnings: list) -> tuple:
     """
-    Table row mil jaye to wohi chalti hai — LLM ka jawab us par nahi.
+    If a table row is found it wins — the LLM's answer does not override it.
 
-    Yeh guard ko kamzor nahi karta: value document se hi aati hai, LLM
-    se nahi. Balki yeh saboot LLM ke hawale se ZYADA mazboot hai, kyunki
-    line khud kehti hai ke yeh kis field ki value hai.
+    This does not weaken the guard: the value still comes from the
+    document, not the LLM. In fact this evidence is STRONGER than an LLM
+    citation, because the line itself says which field the value belongs to.
     """
     if not policy_text:
         return fields, warnings
@@ -801,12 +1006,12 @@ def _apply_labeled_times(fields, policy_text: str, warnings: list) -> tuple:
         label = FIELD_LABELS[name]
         current = fields.get(name)
 
-        # Is field par jo bhi pehle kaha gaya tha wo ab purana ho chuka —
-        # faisla ab table row par hai
+        # Whatever was said about this field before is now superseded —
+        # the table row decides
         warnings = [w for w in warnings if not w.startswith(f"{label}:")]
 
         if current is None:
-            # LLM se rah gaya tha — document mein saaf likha hai
+            # The LLM missed it — the document states it plainly
             fields[name] = {
                 "value": value,
                 "source_quote": line[:500],
@@ -814,11 +1019,12 @@ def _apply_labeled_times(fields, policy_text: str, warnings: list) -> tuple:
             }
 
         elif current["value"] != value:
-            # Document apne aap mein mukhtalif hai — table kuch, prose kuch
+            # The document disagrees with itself — the table says one thing,
+            # the prose another
             warnings.append(
-                f"{label}: document mein do alag baatein likhi hain — "
-                f'"{line.strip()}" bhi aur {current["value"]} bhi. '
-                f"Table wali li gayi hai, zaroor check karein"
+                f"{label}: the document says two different things — "
+                f'"{line.strip()}" as well as {current["value"]}. '
+                f"The table value was used; please check"
             )
             fields[name] = {
                 "value": value,
@@ -827,7 +1033,7 @@ def _apply_labeled_times(fields, policy_text: str, warnings: list) -> tuple:
             }
 
         else:
-            # Wahi value, magar table ka hawala zyada saaf hai
+            # The same value, but the table citation is clearer
             fields[name] = {
                 "value": value,
                 "source_quote": line[:500],
@@ -839,28 +1045,27 @@ def _apply_labeled_times(fields, policy_text: str, warnings: list) -> tuple:
 
 def _rescue_shift_pair(proposed, kept, policy_text: str, warnings: list) -> tuple:
     """
-    Shift start aur end ek JODI hain — LLM aksar dono ke liye EK hi line
-    quote kar deta hai.
+    Shift start and end are a PAIR — the LLM often quotes ONE line for both.
 
-    ═══ ASAL SOORAT ═══
-    Document mein saaf likha tha:
+    ═══ THE REAL CASE ═══
+    The document said plainly:
         "Monday to Friday: 09:00 AM – 06:00 PM"
-    LLM ne dono values bilkul sahi deen (09:00 aur 18:00), magar dono ka
-    hawala yeh line di:
+    The LLM gave both values perfectly correctly (09:00 and 18:00), but
+    cited this line for both:
         "Employees are expected to be available and ready to work at 09:00 AM."
-    Us line mein 18:00 hai hi nahi, is liye `shift_end` saboot ke bagair
-    reh gaya aur gir gaya — halanke value document mein maujood thi.
+    That line does not contain 18:00 at all, so `shift_end` was left
+    without evidence and dropped — even though the value was in the document.
 
-    Guard ko dheela karna ghalat hota (wohi guard man-gharat values rokta
-    hai). Is liye doosra rasta: document mein aisi line dhoondo jo THEEK
-    wohi jodi batati ho. Mil jaye to dono rakh lo, usi line ke hawale ke
-    saath aur `low` confidence par.
+    Loosening the guard would be wrong (that same guard stops invented
+    values). So: another route — find a line in the document that states
+    EXACTLY that pair. If one exists, keep both, cited to that line and at
+    `low` confidence.
 
-    Jodi document mein na ho to kuch nahi hota — man-gharat value ab bhi
-    andar nahi aa sakti (jaise leave-only document mein 09:00–17:00).
+    If the pair is not in the document nothing happens — an invented value
+    still cannot get in (such as 09:00–17:00 in a leave-only document).
     """
     if "shift_start" in kept and "shift_end" in kept:
-        return kept, warnings          # dono pehle hi tasdeeq ho chuke
+        return kept, warnings          # both were already verified
 
     start = proposed.get("shift_start", {}).get("value")
     end = proposed.get("shift_end", {}).get("value")
@@ -883,14 +1088,14 @@ def _rescue_shift_pair(proposed, kept, policy_text: str, warnings: list) -> tupl
             }
             rescued.append(name)
 
-        # Jo field bach gayi, uska "nahi lagayi" wala warning ab ghalat
-        # hai — usay hata do warna CEO ko ulta paigham milega
+        # The rescued field's "not applied" warning is now wrong — remove
+        # it, or the CEO gets the opposite message
         dropped_labels = tuple(f"{FIELD_LABELS[n]}:" for n in rescued)
         warnings = [w for w in warnings if not w.startswith(dropped_labels)]
 
         warnings.extend(
-            f"{FIELD_LABELS[n]}: agent ne ghalat line quote ki thi — "
-            f"document se sahi line dhoond li gayi, khud dekh lein"
+            f"{FIELD_LABELS[n]}: the agent quoted the wrong line — the "
+            f"correct line was found in the document; please check"
             for n in rescued
         )
         break
@@ -900,8 +1105,8 @@ def _rescue_shift_pair(proposed, kept, policy_text: str, warnings: list) -> tupl
 
 def _cross_check(fields) -> list:
     """
-    Field alag alag theek hon, phir bhi mil kar bemaani ho sakte hain.
-    Yahan sirf WARN karte hain — CEO faisla kare, hum chup chaap na badlein.
+    Fields can each be valid and still be nonsense together.
+    Here we only WARN — the CEO decides; we never change things silently.
     """
     warnings = []
 
@@ -912,7 +1117,7 @@ def _cross_check(fields) -> list:
 
     if start and end:
         if start == end:
-            warnings.append("Shift start aur end ek hi waqt hain — zaroor check karein")
+            warnings.append("Shift start and end are the same time — please check")
         else:
             sh, sm = (int(x) for x in start.split(":"))
             eh, em = (int(x) for x in end.split(":"))
@@ -920,26 +1125,26 @@ def _cross_check(fields) -> list:
             length = (e - s) if e > s else (24 * 60 - s + e)
 
             if length < 60:
-                warnings.append(f"Shift sirf {length} minute ki ban rahi hai — check karein")
+                warnings.append(f"The shift works out to only {length} minutes — please check")
             elif length > 16 * 60:
                 warnings.append(
-                    f"Shift {length // 60} ghante ki ban rahi hai — "
-                    f"shayad AM/PM ulta parha gaya"
+                    f"The shift works out to {length // 60} hours — "
+                    f"the AM/PM may have been read the wrong way round"
                 )
 
-            # Shift ki lambai aur minimum hours ka mel
+            # Does the shift length agree with the minimum hours?
             min_hours = val("min_daily_hours")
             if min_hours and min_hours > length / 60 + 0.01:
                 warnings.append(
-                    f"Minimum {min_hours} ghante mange ja rahe hain magar shift "
-                    f"sirf {round(length / 60, 1)} ghante ki hai"
+                    f"A minimum of {min_hours} hours is required but the shift "
+                    f"is only {round(length / 60, 1)} hours"
                 )
 
     ot, min_hours = val("overtime_threshold"), val("min_daily_hours")
     if ot and min_hours and ot < min_hours:
         warnings.append(
-            f"Overtime {ot} ghante par shuru ho raha hai jo minimum "
-            f"{min_hours} ghante se kam hai"
+            f"Overtime starts at {ot} hours, which is below the minimum "
+            f"of {min_hours} hours"
         )
 
     return warnings
@@ -966,7 +1171,7 @@ work_policy_graph = build_work_policy_graph()
 
 def extract_work_policy(company_id: int, policy_text: str = "") -> dict:
     """
-    Policy se working hours nikalo — SIRF wo fields jo document mein hain.
+    Extract the working hours from the policy — ONLY the fields in the document.
 
     Return: {fields, warnings, chunks_used, error}
     """
