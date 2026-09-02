@@ -69,11 +69,37 @@ def assert_can_view(db: Session, current_user: dict, employee_id: int) -> User:
 
 
 def company_employees(db: Session, ceo: User) -> List[User]:
-    """Active employees in the CEO's company (excluding fired ones)"""
+    """
+    People who work here today. Payroll, emails and leave all use this.
+
+    ═══ IT USED TO SAY `status != "fired"` ═══
+    Which is not "employed" — it is "not this one particular word". So
+    anybody `inactive`, `approved` or `pending` counted as staff, the
+    monthly payroll job ran for them, and the payslip emails followed.
+    Any status added later would have joined them silently.
+
+    The whitelist now lives in `utils/workforce.py`, in one place, and
+    this delegates to it. Where a CEO screen needs to see people who
+    have not started yet, use `company_roster()` below and say so.
+    """
+    from app.utils.workforce import employed
+
     if not ceo.company_name:
         return []
-    return db.query(User).filter(
-        User.company_name == ceo.company_name,
-        User.role == "employee",
-        User.status != "fired"
-    ).order_by(User.full_name).all()
+    return employed(db, ceo.id)
+
+
+def company_roster(db: Session, ceo: User) -> List[User]:
+    """
+    Everyone the CEO manages — working here, or about to.
+
+    For planning screens only: setting up a salary structure before
+    somebody's first day is sensible, paying them before it is not. This
+    list is never used to send anything.
+    """
+    from app.utils.workforce import employed, not_yet_started
+
+    if not ceo.company_name:
+        return []
+    people = employed(db, ceo.id) + not_yet_started(db, ceo.id)
+    return sorted(people, key=lambda u: (u.full_name or "").lower())

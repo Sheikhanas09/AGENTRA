@@ -18,6 +18,10 @@ from sqlalchemy import text
 from app.database import engine, SessionLocal, Base
 from app.models.user import User          # noqa: F401  (FK target)
 from app.models import attendance as attendance_models
+from app.models.chat import (
+    ChatSession, ChatMessage, HrRequest, HrCase, HrSettings, HrNudge,
+    EmploymentRecord,
+)
 from app.models.payroll import (
     CompanyBranding, SalaryStructure, PayrollPolicy, PayrollRun, Payslip,
     PayrollAdjustment, EmployeeLoan, LoanRepayment
@@ -84,6 +88,24 @@ NEW_INDEXES = [
 
 def run():
     with engine.begin() as conn:
+        # ──── chat_sessions.kind ────
+        # Added after the table existed, so create_all cannot do it.
+        conn.execute(text(
+            "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS "
+            "kind VARCHAR DEFAULT 'employee'"
+        ))
+        # ──── users.designation ────
+        # Job title, kept apart from department. Nothing is moved
+        # automatically: only a person can say whether "Backend
+        # Developer" in someone's department field was meant as the team
+        # or the role.
+        conn.execute(text(
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS designation VARCHAR"
+        ))
+        conn.execute(text(
+            "UPDATE chat_sessions SET kind = 'employee' WHERE kind IS NULL"
+        ))
+
         # ──── Columns ────
         for table, column, coltype in NEW_COLUMNS:
             conn.execute(text(
@@ -173,6 +195,20 @@ def run():
     for t in ("company_branding", "salary_structures", "payroll_policy",
               "payroll_runs", "payslips", "payroll_adjustments",
               "employee_loans", "loan_repayments"):
+        print(f"  [ok] {t} ready")
+
+    # ──── The HR help desk tables ────
+    print("\n  HR help desk tables...")
+    Base.metadata.create_all(
+        bind=engine,
+        tables=[ChatSession.__table__, ChatMessage.__table__,
+                HrRequest.__table__, HrCase.__table__,
+                HrSettings.__table__, HrNudge.__table__,
+                EmploymentRecord.__table__]
+    )
+    for t in ("chat_sessions", "chat_messages", "hr_requests",
+              "hr_cases", "hr_settings", "hr_nudges",
+              "employment_records"):
         print(f"  [ok] {t} ready")
 
     backfill_unpaid_leave_types()

@@ -1,5 +1,6 @@
 # ──── Raaz ────
 .env
+.env.*
 app/credentials.json
 app/token.json
 

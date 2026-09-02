@@ -760,7 +760,7 @@ def _has_evidence(name: str, value, text: str) -> bool:
         word = NUMBER_WORDS.get(whole)
         return bool(word and word in low)
 
-    # 8.5 → "8.5" ya "8½" ya "8 1/2"
+    # 8.5 → "8.5" or "8½" or "8 1/2"
     return bool(re.search(rf"\b{whole}\s*[.,]\s*5\b", low))
 
 

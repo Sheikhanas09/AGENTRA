@@ -57,6 +57,7 @@ def create_employee(db: Session, data, ceo_id: int):
         password=hashed,
         phone=data.phone,
         department=data.department,
+        designation=getattr(data, "designation", None) or None,
         joining_date=data.joining_date,
         role="employee",
         status="active",
@@ -72,8 +73,17 @@ def create_employee(db: Session, data, ceo_id: int):
 
 # Fetch all of a CEO's employees
 def get_employees_by_company(db: Session, company_name: str):
+    """
+    The CEO's people — everyone working here, or about to.
+
+    This had no status filter at all, so the CEO's own employee list
+    included people they had let go. Leavers are reached through the
+    employment records, not through a list captioned "your employees".
+    """
+    from app.utils.workforce import EMPLOYED, NOT_YET
 
     return db.query(User).filter(
         User.role == "employee",
-        User.company_name == company_name
-    ).all()
+        User.company_name == company_name,
+        User.status.in_(tuple(EMPLOYED) + tuple(NOT_YET)),
+    ).order_by(User.full_name).all()

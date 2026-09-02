@@ -19,7 +19,13 @@ class User(Base):
 
     phone = Column(String)
 
+    # ──── Department and job title are different things ────
+    # `department` alone held both — "Finance" for one person and
+    # "Backend Developer" for another. Counting employees by department
+    # then produced "the Backend Developer department has 2 people",
+    # which is not a department and not a useful answer.
     department = Column(String)
+    designation = Column(String)
 
     joining_date = Column(Date)
 

@@ -654,9 +654,18 @@ def run_payroll(
         attempt = (existing.attempt or 1) + 1
         db.flush()
 
-    employees = company_employees(db, ceo)
+    # Only people who had actually joined by the end of this month —
+    # see utils/workforce.py. Four payslips were once generated for
+    # somebody's February through May before they started in June.
+    from app.utils.workforce import employed_during
+
+    employees = employed_during(db, ceo.id, data.period)
     if not employees:
-        raise HTTPException(400, "This company has no employees")
+        raise HTTPException(
+            400,
+            f"Nobody was on the payroll in {data.period} — check joining "
+            f"dates, or that this company has employees."
+        )
 
     run = PayrollRun(
         company_id=ceo.id,
@@ -972,8 +981,8 @@ def download_slip(
     if not slip.slip_pdf:
         raise HTTPException(
             404,
-            "The PDF for this slip has not been produced yet — ask HR to "
-            "karne ko kahein"
+            "The PDF for this slip has not been produced yet — please ask "
+            "HR to generate it"
         )
 
     safe_name = "".join(

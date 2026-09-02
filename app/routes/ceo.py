@@ -67,6 +67,10 @@ def get_employees(
                 "email": emp.email,
                 "phone": emp.phone,
                 "department": emp.department,
+                # The role inside the department. The create-user form
+                # offers both from what the company already uses, so a
+                # job title stops landing in the department column.
+                "designation": emp.designation,
                 "joining_date": emp.joining_date,
                 "status": emp.status
             }

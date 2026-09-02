@@ -1022,10 +1022,12 @@ def get_all_employees(
         })
 
     # ──── Type 2: Manually created employees ────
+    # Whitelist, not "!= fired" — see utils/workforce.py
+    from app.utils.workforce import EMPLOYED, NOT_YET
     created_employees = db.query(User).filter(
         User.company_name == ceo.company_name,
         User.role == "employee",
-        User.status != "fired"
+        User.status.in_(tuple(EMPLOYED) + tuple(NOT_YET)),
     ).all()
 
     for emp in created_employees:

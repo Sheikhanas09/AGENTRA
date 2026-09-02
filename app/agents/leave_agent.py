@@ -3,7 +3,6 @@ import json
 import chromadb
 from datetime import datetime
 from sentence_transformers import SentenceTransformer
-from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 from typing import TypedDict
@@ -51,12 +50,9 @@ def get_chroma_client():
 def get_llm():
     global _llm
     if _llm is None:
-        api_key = os.getenv("GROQ_API_KEY")
-        if not api_key:
-            raise RuntimeError("GROQ_API_KEY is not set")
-        _llm = ChatGroq(
-            api_key=api_key,
-            model=groq_model(),
+        from app.utils.llm import chat_model
+
+        _llm = chat_model(
             temperature=0.1,
             # ↑ Very low — leave decisions must be consistent
             #

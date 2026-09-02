@@ -1,0 +1,119 @@
+"""
+Move job titles out of the department column
+────────────────────────────────────────────
+    py set_org_chart.py                                 show what is stored
+    py set_org_chart.py --map "Backend Developer=Engineering" \\
+                        --map "Frontend Developer=Engineering"
+    py set_org_chart.py --map ... --apply
+
+WHAT IS WRONG WITH THE DATA
+───────────────────────────
+`users.department` holds two different kinds of thing:
+
+    Human Resources     a department
+    Finance             a department
+    Backend Developer   a JOB TITLE
+    Frontend Developer  a JOB TITLE
+
+and `users.designation` — the column meant for the job title — is empty
+for every employee in every company.
+
+So the console can only offer what it finds: a menu of "departments"
+that is half job titles. Engineering does not appear anywhere in the
+database, and nothing may invent it.
+
+WHY THIS SCRIPT TAKES THE MAPPING FROM YOU
+──────────────────────────────────────────
+Only the company knows its own org chart. Backend Developer might sit
+under Engineering, or Product, or Platform. A mapping written into this
+file would be a guess about somebody's company, and the console has
+spent long enough being wrong confidently.
+
+So: nothing is assumed, nothing is renamed, and nothing runs without
+--apply. Each --map moves ONE current department value into a real
+department, keeping the old value as the person's designation:
+
+    "Backend Developer=Engineering"
+
+        department  "Backend Developer"  ->  "Engineering"
+        designation  (empty)             ->  "Backend Developer"
+
+Rows already carrying a designation are left exactly as they are.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from app.database import SessionLocal
+from app.models.user import User
+
+APPLY = "--apply" in sys.argv
+
+MAPPING = {}
+for i, arg in enumerate(sys.argv):
+    if arg == "--map" and i + 1 < len(sys.argv):
+        pair = sys.argv[i + 1]
+    elif arg.startswith("--map="):
+        pair = arg.split("=", 1)[1]
+    else:
+        continue
+    if "=" in pair:
+        title, dept = pair.split("=", 1)
+        MAPPING[title.strip().lower()] = dept.strip()
+
+
+def main() -> int:
+    db = SessionLocal()
+    people = db.query(User).filter(User.role == "employee").all()
+
+    if not people:
+        print("No employees on record.")
+        return 0
+
+    print(f"{'company':<14} {'name':<16} {'department':<22} "
+          f"{'designation':<20} what would change")
+    print("─" * 96)
+
+    todo = []
+    for u in people:
+        current = (u.department or "").strip()
+        target = MAPPING.get(current.lower())
+        change = ""
+
+        if target and not (u.designation or "").strip():
+            change = f"-> dept {target}, designation {current}"
+            todo.append((u, target, current))
+        elif target:
+            change = "already has a designation — left alone"
+
+        print(f"{(u.company_name or '')[:13]:<14} {(u.full_name or '')[:15]:<16} "
+              f"{current[:21]:<22} {str(u.designation or '—')[:19]:<20} {change}")
+
+    if not MAPPING:
+        print("\nNo --map given, so nothing would change. Each one moves a "
+              "job title out of the department column, e.g.")
+        print('  py set_org_chart.py --map "Backend Developer=Engineering"')
+        db.close()
+        return 0
+
+    print(f"\n{len(todo)} row(s) would change"
+          + ("" if APPLY else " — dry run, pass --apply to write"))
+
+    if not APPLY:
+        db.close()
+        return 0
+
+    for u, target, title in todo:
+        u.department = target
+        u.designation = title
+    db.commit()
+    print(f"done — {len(todo)} row(s) updated")
+
+    db.close()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

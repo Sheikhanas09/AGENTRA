@@ -7,12 +7,15 @@ from app.models import user
 from app.models import recruitment 
 from app.models import attendance
 from app.models import payroll  # noqa: F401  (so the tables get registered)
+from app.models import chat  # noqa: F401  (so the tables get registered)
 from app.routes import auth, admin, ceo, recruitment as recruitment_routes
 from app.utils.security import hash_password
 from app.routes import settings as settings_routes
 from app.routes import attendance as attendance_routes
 from app.routes import leave as leave_routes
 from app.routes import payroll as payroll_routes
+from app.routes import chat as chat_routes
+from app.routes import hr as hr_routes
 
 app = FastAPI()
 
@@ -93,6 +96,8 @@ app.include_router(settings_routes.router)
 app.include_router(attendance_routes.router)
 app.include_router(leave_routes.router)
 app.include_router(payroll_routes.router)
+app.include_router(chat_routes.router)
+app.include_router(hr_routes.router)
 
 
 @app.get("/")

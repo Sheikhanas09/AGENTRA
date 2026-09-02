@@ -256,6 +256,16 @@ def register_jobs():
     # often so that a server outage does not make it miss the 1st.
     scheduler.every(6 * 60, job_monthly_payroll, "monthly-payroll",
                     run_at_start=True)
+
+    # ──── The HR desk speaking first ────
+    # Every 60 minutes is often enough for "your probation ends on
+    # Friday" to be timely, and rare enough that a company with nothing
+    # happening barely notices it. Each nudge is written to `hr_nudges`
+    # before it goes, so the frequency here cannot turn one message into
+    # twenty-four.
+    from app.utils.hr_proactive import job_hr_proactive
+    scheduler.every(60, job_hr_proactive, "hr-proactive")
+
     return scheduler
 
 
@@ -436,9 +446,10 @@ def _run_payroll_for(db, ceo, period: str):
 
     from app.agents.payroll_agent import run_for_employee
     from app.models.payroll import PayrollRun
-    from app.utils.company import company_employees
+    from app.utils.workforce import employed_during
 
-    employees = company_employees(db, ceo)
+    # Not everyone employed today — everyone employed THAT month.
+    employees = employed_during(db, ceo.id, period)
     if not employees:
         return None
 

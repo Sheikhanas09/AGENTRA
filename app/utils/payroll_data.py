@@ -26,6 +26,7 @@ from app.models.attendance import (
     LeaveRequest, LeaveStatusEnum,
 )
 from app.models.payroll import SalaryStructure, PayrollPolicy
+from app.models.user import User
 from app.utils.payroll_calc import (
     SalaryInputs, PolicyInputs, WorkInputs, d,
 )
@@ -323,10 +324,34 @@ def gather_inputs(db: Session, employee_id: int, company_id: int, period: str,
     working_days = count_working_days(wpol, start, end)
     min_hours = d(wpol.min_daily_hours) if wpol and wpol.min_daily_hours else Decimal("8")
 
-    # ──── The actual counts ────
-    att = attendance_totals(db, employee_id, start, end, wpol)
-    lv = leave_totals(db, employee_id, company_id, wpol, start, end)
-    ab = absent_days(db, employee_id, company_id, wpol, start, end)
+    # ──────────────────────────────────────────────────────────────
+    # THE MONTH IS THE MONTH; THEIR MONTH STARTS WHEN THEY DID
+    # ──────────────────────────────────────────────────────────────
+    # Every count below took the period's first day as its start, so a
+    # person hired on 14 August was measured from 1 August. On Sheikh
+    # Anas's August slip that became 11 absences and a 26,190.45
+    # deduction for days he did not work here.
+    #
+    # `employed_during()` already keeps payroll from running for months
+    # BEFORE somebody joined. This is the same rule inside the month they
+    # joined in, which that check cannot see.
+    #
+    # Only the start moves. `working_days` stays the whole month's,
+    # because the daily rate is a property of the month, not of the
+    # person — otherwise a mid-month joiner would have a higher daily
+    # rate than the colleague sitting next to them.
+    person = db.query(User).filter(User.id == employee_id).first()
+    joined = person.joining_date if person else None
+    paid_from = max(start, joined) if joined else start
+    # 0 here is a real answer, not a missing one: a joining date after
+    # this month means nothing was earned in it.
+    employed_days = (count_working_days(wpol, paid_from, end)
+                     if paid_from <= end else 0)
+
+    # ──── The actual counts, from the day they joined ────
+    att = attendance_totals(db, employee_id, paid_from, end, wpol)
+    lv = leave_totals(db, employee_id, company_id, wpol, paid_from, end)
+    ab = absent_days(db, employee_id, company_id, wpol, paid_from, end)
 
     # ──── That month's one-off items + the loan instalment ────
     adj = adjustment_totals(db, employee_id, company_id, period)
@@ -337,6 +362,8 @@ def gather_inputs(db: Session, employee_id: int, company_id: int, period: str,
 
     work = WorkInputs(
         working_days_in_month=working_days,
+        employed_days_in_month=employed_days,
+        employed_from=str(paid_from) if paid_from > start else None,
         min_daily_hours=min_hours,
         present_days=att["present_days"],
         overtime_minutes=att["overtime_minutes"],
@@ -361,6 +388,12 @@ def gather_inputs(db: Session, employee_id: int, company_id: int, period: str,
         "attendance": {
             **att,
             "working_days_in_month": working_days,
+            # What the slip needs in order to explain itself later: the
+            # month's days, and how many of them were theirs.
+            "employed_days_in_month": employed_days,
+            "counted_from": str(paid_from),
+            "joined_on": str(joined) if joined else None,
+            "joined_during_this_month": bool(joined and joined > start),
             "min_daily_hours": float(min_hours),
             "period_start": str(start),
             "period_end": str(end),

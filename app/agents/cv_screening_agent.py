@@ -2,19 +2,16 @@ import json
 import os
 from typing import TypedDict
 from dotenv import load_dotenv
-from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 import chromadb
 from sentence_transformers import SentenceTransformer
 
-from app.utils.llm import groq_model
+from app.utils.llm import chat_model
 
 load_dotenv()
 
-llm = ChatGroq(
-    api_key=os.getenv("GROQ_API_KEY"),
-    model=groq_model(),
+llm = chat_model(
     temperature=0.3,
     # gpt-oss is a reasoning model — its thinking tokens come out of the
     # same budget, so this was raised from 1500 (see utils/llm.py)

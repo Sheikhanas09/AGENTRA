@@ -42,7 +42,7 @@ person, not for a developer.
 
 from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP
-from typing import List
+from typing import List, Optional
 
 ZERO = Decimal("0.00")
 CENT = Decimal("0.01")
@@ -127,6 +127,21 @@ class WorkInputs:
     working_days_in_month: int = 0    # counted from the policy's working_days
     min_daily_hours: Decimal = Decimal("8")
 
+    # ──── How many of those days they were actually employed for ────
+    # None means "not supplied", and then it is the whole month — which
+    # is almost everybody, and nothing about their slip changes.
+    #
+    # It differs for somebody who joined mid-month, and then it is the
+    # number that decides what they earned. Without it a person hired on
+    # the 14th was paid from the 1st.
+    #
+    # None and 0 are deliberately NOT the same. Zero employed days is a
+    # real answer — somebody whose joining date falls after this month
+    # ended — and it must mean "nothing was earned", not "assume a full
+    # month" the way an unset field does.
+    employed_days_in_month: Optional[int] = None
+    employed_from: Optional[str] = None   # so the slip can explain itself
+
     present_days: int = 0
     overtime_minutes: int = 0
     undertime_minutes: int = 0
@@ -159,6 +174,9 @@ class WorkInputs:
 class PayrollResult:
     # ──── Rates ────
     working_days: int = 0
+    # Of those, the ones they were on the payroll for. Same number for
+    # anybody who worked the whole month.
+    employed_days: int = 0
     daily_rate: Decimal = ZERO
     hourly_rate: Decimal = ZERO
 
@@ -271,6 +289,47 @@ def compute_payroll(salary: SalaryInputs, policy: PolicyInputs,
         r.notes.append(
             f"daily rate = {base} / {r.working_days} days = {r.daily_rate}"
         )
+
+    # ══════════════════════════════════════════
+    # 1b. Only the days they were employed are earned
+    # ══════════════════════════════════════════
+    # ═══ WHY THIS IS PRO-RATED AND NOT DEDUCTED ═══
+    # Sheikh Anas joined on 14 August and his August slip charged him
+    # with 11 absences — days he had no job here. Stopping the absence
+    # count at his joining date fixes half of it: he would then be paid
+    # a full month's salary, including the fortnight before he was
+    # hired. The other half is that those days were never earned.
+    #
+    # Pro-rating the base is the honest form of that, and it keeps every
+    # other figure intact: the DAILY RATE stays the full month's rate, so
+    # one day absent still costs one full day's pay, and the provident
+    # fund follows the base as it always has.
+    #
+    # A leaver has the same shape from the other end; that is not wired
+    # up yet because `ended_on` lives in employment_records and payroll
+    # has never read it.
+    supplied = work.employed_days_in_month
+    employed_days = r.working_days if supplied is None else int(supplied)
+    employed_days = max(0, min(employed_days, r.working_days or employed_days))
+    r.employed_days = employed_days
+
+    if r.working_days > 0 and employed_days == 0:
+        r.warnings.append(
+            "This person was not employed on any working day of this month "
+            "— nothing is payable. Check why payroll ran for them."
+        )
+
+    if r.working_days > 0 and employed_days < r.working_days:
+        earned = q(base * Decimal(employed_days) / Decimal(r.working_days))
+        r.notes.append(
+            f"employed for {employed_days} of the month's {r.working_days} "
+            f"working days"
+            + (f" (from {work.employed_from})" if work.employed_from else "")
+            + f", so salary = {base} × {employed_days}/{r.working_days}"
+            f" = {earned}"
+        )
+        base = earned
+        r.base_salary = earned
 
     # ══════════════════════════════════════════
     # 2. Earnings
