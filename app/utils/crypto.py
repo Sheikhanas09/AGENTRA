@@ -37,6 +37,20 @@ load_dotenv()
 
 ENV_NAME = "INTEGRATION_SECRET_KEY"
 
+# ══════════════════════════════════════════════
+# MORE THAN ONE SECRET, FOR THE SAME REASON AS BEFORE
+# ══════════════════════════════════════════════
+# The note above explains why the Google key is not `SECRET_KEY`. The
+# same argument applies again the moment a second kind of secret shows
+# up: chat transcripts are encrypted with `CHAT_SECRET_KEY`, not with
+# this one.
+#
+# Sharing one value would mean losing it costs BOTH — every company has
+# to reconnect Google AND every transcript ever written becomes
+# unreadable. Two things with different lifetimes and different blast
+# radii do not share a key.
+CHAT_ENV_NAME = "CHAT_SECRET_KEY"
+
 _key = os.getenv(ENV_NAME, "").strip()
 
 
@@ -51,6 +65,44 @@ def is_configured() -> bool:
 def new_key() -> str:
     """A fresh key, for printing into `.env`. Never stored by this code."""
     return Fernet.generate_key().decode()
+
+
+def cipher_for(env_name: str, what: str) -> Fernet:
+    """
+    The cipher for one named key.
+
+    Each secret is read from the environment at call time rather than
+    cached at import, so a key added to `.env` after the module loaded
+    still works — which is what happens when somebody follows the error
+    message below and restarts nothing.
+    """
+    key = os.getenv(env_name, "").strip()
+    if not key:
+        raise SecretsNotConfigured(
+            f"{env_name} is not set in .env, so {what} cannot be stored "
+            f"safely. Generate one with:\n"
+            f"    py -c \"from app.utils.crypto import new_key; "
+            f"print(new_key())\"\n"
+            f"and put it in .env as {env_name}=<value>.\n"
+            # Plain ASCII on purpose. This message is printed on a
+            # Windows console more often than not, and cp1252 raises
+            # UnicodeEncodeError on the arrow and warning glyphs — an
+            # error about a missing key that itself crashes while being
+            # displayed is not a helpful error.
+            f"Keep it - losing it means the data encrypted with it "
+            f"cannot be read again."
+        )
+    try:
+        return Fernet(key.encode())
+    except (ValueError, TypeError) as e:
+        raise SecretsNotConfigured(
+            f"{env_name} is not a valid Fernet key ({e}). It must be the "
+            f"44-character value produced by `new_key()`."
+        ) from e
+
+
+def is_chat_configured() -> bool:
+    return bool(os.getenv(CHAT_ENV_NAME, "").strip())
 
 
 def _cipher() -> Fernet:

@@ -104,6 +104,13 @@ class CompanyWorkPolicy(Base):
 # ──── Table 2: Company Policies (Document) ────
 class CompanyPolicy(Base):
     __tablename__ = "company_policies"
+    # `company_id` par index. FK par ON DELETE RESTRICT hai, aur
+    # Postgres ko har company delete/update par yeh table scan karni
+    # parti hai. Chhe tables reh gayi thin kyunke `check_tenancy` ka
+    # purana check indexes GIN raha tha, har table par assert nahi
+    # kar raha tha.
+    __table_args__ = (Index("ix_company_policies_company", "company_id"),)
+
 
     id = Column(Integer, primary_key=True, index=True)
     company_id = Column(Integer, nullable=False)
@@ -289,6 +296,12 @@ class AttendancePhoto(Base):
         UniqueConstraint("session_id", "kind", name="uq_photo_session_kind"),
         Index("ix_photo_session_kind", "session_id", "kind"),
         Index("ix_photo_employee_kind", "employee_id", "kind"),
+    # `company_id` par index. FK par ON DELETE RESTRICT hai, aur
+    # Postgres ko har company delete/update par yeh table scan karni
+    # parti hai. Chhe tables reh gayi thin kyunke `check_tenancy` ka
+    # purana check indexes GIN raha tha, har table par assert nahi
+    # kar raha tha.
+    Index("ix_attendance_photos_company", "company_id"),
     )
 
 
@@ -355,6 +368,13 @@ class CompanyLeaveType(Base):
 # ──── Table 6: Leave Requests ────
 class LeaveRequest(Base):
     __tablename__ = "leave_requests"
+    # `company_id` par index. FK par ON DELETE RESTRICT hai, aur
+    # Postgres ko har company delete/update par yeh table scan karni
+    # parti hai. Chhe tables reh gayi thin kyunke `check_tenancy` ka
+    # purana check indexes GIN raha tha, har table par assert nahi
+    # kar raha tha.
+    __table_args__ = (Index("ix_leave_requests_company", "company_id"),)
+
 
     id = Column(Integer, primary_key=True, index=True)
     employee_id = Column(Integer, ForeignKey("users.id"), nullable=False)
@@ -427,12 +447,25 @@ class LeaveDocument(Base):
     __table_args__ = (
         Index("ix_leave_doc_request", "leave_request_id"),
         Index("ix_leave_doc_employee", "employee_id"),
+    # `company_id` par index. FK par ON DELETE RESTRICT hai, aur
+    # Postgres ko har company delete/update par yeh table scan karni
+    # parti hai. Chhe tables reh gayi thin kyunke `check_tenancy` ka
+    # purana check indexes GIN raha tha, har table par assert nahi
+    # kar raha tha.
+    Index("ix_leave_documents_company", "company_id"),
     )
 
 
 # ──── Table 7: Leave Balances ────
 class LeaveBalance(Base):
     __tablename__ = "leave_balances"
+    # `company_id` par index. FK par ON DELETE RESTRICT hai, aur
+    # Postgres ko har company delete/update par yeh table scan karni
+    # parti hai. Chhe tables reh gayi thin kyunke `check_tenancy` ka
+    # purana check indexes GIN raha tha, har table par assert nahi
+    # kar raha tha.
+    __table_args__ = (Index("ix_leave_balances_company", "company_id"),)
+
 
     id = Column(Integer, primary_key=True, index=True)
     employee_id = Column(Integer, ForeignKey("users.id"), nullable=False)
@@ -481,6 +514,13 @@ class PolicyDecisionLog(Base):
 # ──── Table 9: Policy Overrides ────
 class CompanyPolicyOverride(Base):
     __tablename__ = "company_policy_overrides"
+    # `company_id` par index. FK par ON DELETE RESTRICT hai, aur
+    # Postgres ko har company delete/update par yeh table scan karni
+    # parti hai. Chhe tables reh gayi thin kyunke `check_tenancy` ka
+    # purana check indexes GIN raha tha, har table par assert nahi
+    # kar raha tha.
+    __table_args__ = (Index("ix_company_policy_ovr_company", "company_id"),)
+
 
     id = Column(Integer, primary_key=True, index=True)
     company_id = Column(Integer, nullable=False)

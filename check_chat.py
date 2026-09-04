@@ -27,6 +27,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -117,9 +118,6 @@ CASES = [
     # ── payroll: this employee's own ──
     ("my salary aug", "What was my salary for August?", ALWAYS,
      "payslips", ["28,571", "28571"], "none"),
-    ("why zero", "Why was my August salary zero?",
-     ALWAYS + ["may have been", "might have been"], None,
-     ["28,571", "2,285", "absence"], "none"),
     ("basic", "What is my basic salary?", ALWAYS,
      "salary_structure", ["50,000", "50000"], "none"),
     ("payday", "When is payday?", ALWAYS + ["1st of", "last working day",
@@ -239,6 +237,111 @@ def judge(label, out, banned, must_use, must_say, action, stored=None):
         problems.append(f"no {action} was opened")
 
     return problems, used
+
+
+def zero_salary_case(db, staff):
+    """
+    "Why was my salary zero?" — poocha us mahine ka jo waqai zero tha.
+
+    ═══ YEH PEHLE HARDCODED THA, AUR FLAKY THA ═══
+        ("why zero", "Why was my August salary zero?", ...,
+         ["28,571", "2,285", "absence"], "none")
+
+    Do alag masle the.
+
+    **Ek: yeh phrasing gin raha tha, data nahi.** Chhe run mein paanch
+    pass hue. Jo gira us ka jawab bilkul theek tha —
+
+        "you were absent for 12 out of the 21 working days ... which
+         resulted in a deduction that left your net salary at zero"
+
+    — magar us ne `absent` likha aur case `absence` maangta tha. Teen
+    passing runs bhi sirf usi ek lafz par tike the. Yani case is baat
+    par sikka uchhal raha tha ke model kaunsa lafz chunta hai.
+
+    **Do: "August" aur wo teen aankre is DATABASE ki halat hain.**
+    Employee badla, joining date badli, ya salary badli — case us din
+    fail hoga jab kisi ne koi jaiz kaam kiya hoga.
+
+    Ab dono record se aate hain: kaunsa mahina zero tha, aur us mahine
+    ki sab se bari deduction ka NAAM aur RAQAM. Jawab ya asli wajah
+    bataye ya asli figure de — dono record mein maujood hain.
+    """
+    from app.models.payroll import Payslip
+    from app.utils.chat_data import get_payslip_breakdown
+
+    def slips(u):
+        return db.query(Payslip).filter(
+            Payslip.employee_id == u.id,
+            Payslip.company_id == COMPANY,
+            Payslip.status != "cancelled",
+            Payslip.net_salary == 0,
+        ).order_by(Payslip.period).all()
+
+    for emp in sorted(staff, key=lambda u: str(u.joining_date or "")):
+        zero = slips(emp)
+        if not zero:
+            continue
+        slip = zero[-1]
+        b = get_payslip_breakdown(db, emp.id, COMPANY, period=slip.period)
+        ded = (b or {}).get("deductions") or {}
+        if not ded:
+            continue
+
+        # Sab se bari deduction — wahi asli wajah hai.
+        name, amount = max(ded.items(), key=lambda kv: float(kv[1] or 0))
+
+        # Lafz ka tana, poora lafz nahi: "absence" aur "absent" ek hi
+        # baat hain aur case ka un mein farq karna bewaqoofi thi.
+        #
+        # ⚠ 5, 6 nahi. `"absence"[:6]` = "absenc", jo "absent" se match
+        # NAHI karta — yani wohi reply phir bhi girta jis ne yeh case
+        # pehli baar tora tha. Pehli koshish mein yahi likha gaya tha
+        # aur us asli reply par chala kar pakda gaya.
+        stem = name.replace("_", " ").strip().lower()[:5]
+
+        # ⚠ SIRF WAJAH, FIGURE KO VIKALP MAT BANAO.
+        # Pehle yeh `[stem, figure1, figure2]` tha — ek disjunction. Us
+        # ka matlab yeh nikla ke sahi raqam ke saath GHALAT wajah pass
+        # ho jati thi:
+        #
+        #   "Your July salary was zero because of a TAX ADJUSTMENT
+        #    of 100,000.09"        <- pass ho gaya, aur bilkul ghalat hai
+        #
+        # Sawal "kyun" hai. Us ka jawab wajah hai, raqam nahi — raqam to
+        # sawal ka jawab diye baghair bhi durust ho sakti hai. To wajah
+        # lazmi hai, aur raqam ki hifazat neeche `stored` karta hai.
+        accept = [stem]
+
+        # Har wo raqam jo is payslip mein waqai maujood hai. Iske baghair
+        # "absence 25,000 aur net 75,000" pass ho jata tha — sirf isliye
+        # ke us mein lafz "absen" tha. Do gol number jinka hisab bhi
+        # mil jaye, bilkul isi tarah dikhte hain jaise gharha hua jawab.
+        stored = set()
+        for v in (slip.gross_pay, slip.net_salary, slip.total_deductions,
+                  slip.base_salary, slip.absent_deduction,
+                  slip.tax_deduction, slip.provident_fund,
+                  slip.unpaid_leave_deduction, slip.late_deduction,
+                  slip.loan_deduction, slip.other_deductions,
+                  slip.allowances_total, slip.overtime_pay):
+            if v is None:
+                continue
+            a = float(v)
+            stored.update({f"{a:,.2f}", f"{a:.2f}",
+                           f"{a:,.0f}" if a == int(a) else f"{a:,.2f}"})
+        for v in ded.values():
+            a = float(v or 0)
+            stored.update({f"{a:,.2f}", f"{a:.2f}",
+                           f"{a:,.0f}" if a == int(a) else f"{a:,.2f}"})
+
+        label = b.get("period_label") or slip.period
+        return [("why zero", f"Why was my {label} salary zero?",
+                 ALWAYS + ["may have been", "might have been"], None,
+                 accept, "none", emp, stored)]
+
+    # Koi zero payslip hi nahi — to case chhup kar pass nahi hoga,
+    # print karke bataya jayega (main() mein).
+    return []
 
 
 def payslip_cases(db, staff):
@@ -416,6 +519,137 @@ def security_cases(db, emp, staff):
     ]
 
 
+# ══════════════════════════════════════════════
+# Where the answer lands
+# ══════════════════════════════════════════════
+# Every case above reads a REPLY. This one reads a ROUTE, and it needs
+# no model at all — so it runs first and costs nothing.
+#
+# Both bots share `chat_sessions`; a `kind` column is the only thing
+# keeping the CEO's console thread and an employee's help-desk thread
+# apart. That means the whole separation rests on every query
+# remembering the filter, and one did not:
+#
+#     session = db.query(ChatSession).filter(
+#         ChatSession.employee_id == req.employee_id
+#     ).order_by(ChatSession.last_active_at.desc()).first()
+#
+# `/chat/message` takes `Depends(get_tenant)`, so a CEO may use the
+# employee help desk too — and their console thread is always the more
+# recent one (the CEO who exposed this had 70 messages in theirs). The
+# decision notice therefore landed in the console transcript, and the
+# thread where the question was actually asked never showed the answer.
+#
+# Not a leak — same person, same company. A correctness bug, and one
+# that the comment directly above the code denied was possible.
+#
+# This drives the REAL route rather than repeating its query, because a
+# check that re-implements the thing it is checking passes by
+# construction.
+def thread_routing_case(db, ceo):
+    """Returns a list of problems, empty when the routing is right."""
+    from fastapi.testclient import TestClient
+
+    from app.main import app as fastapi_app
+    from app.models.chat import ChatMessage, ChatSession, HrRequest
+    from app.utils.security import create_access_token
+
+    client = TestClient(fastapi_app, raise_server_exceptions=False)
+    problems = []
+    made = []
+
+    try:
+        # The thread the CEO asked in, and the console thread they have
+        # been using since. Console is deliberately the more recent —
+        # that is the condition the bug needed.
+        asked_in = ChatSession(
+            employee_id=ceo.id, company_id=ceo.company_id, kind="employee",
+            title="check_chat: asked here",
+            last_active_at=datetime.utcnow() - timedelta(hours=2))
+        console = ChatSession(
+            employee_id=ceo.id, company_id=ceo.company_id, kind="console",
+            title="check_chat: console",
+            last_active_at=datetime.utcnow())
+        db.add_all([asked_in, console])
+        db.flush()
+        made += [asked_in, console]
+
+        req = HrRequest(
+            company_id=ceo.company_id, employee_id=ceo.id, kind="other",
+            subject="check_chat routing probe", source="chat", status="open")
+        db.add(req)
+        db.flush()
+        made.append(req)
+        db.commit()
+
+        hdr = {"Authorization": "Bearer " + create_access_token(
+            {"user_id": ceo.id, "role": "ceo", "email": ceo.email,
+             "company_id": ceo.company_id})}
+
+        # ── The email is recorded, not sent ──
+        # A check that mails a real person every run is a check somebody
+        # eventually stops running. Recording it also covers a second
+        # bug this same case found: the route passed a bare
+        # `company_id`, a name that does not exist in that function, so
+        # every call raised NameError straight into a bare `except` and
+        # the employee was never told their request had been answered.
+        # Nothing was logged loudly enough for anyone to notice.
+        from app.utils import notify
+        sent = []
+        real_send = notify.send_email
+        notify.send_email = lambda **k: sent.append(k) or True
+        try:
+            r = client.post(f"/chat/requests/{req.id}/resolve", headers=hdr,
+                            json={"status": "resolved", "note": "probe"})
+        finally:
+            notify.send_email = real_send
+
+        if r.status_code != 200:
+            problems.append(f"resolve returned {r.status_code}")
+            return problems
+
+        if not sent:
+            problems.append(
+                "the employee was never emailed — the notify call raised "
+                "and the bare `except` in resolve_request swallowed it")
+        elif sent[0].get("company_id") != ceo.company_id:
+            problems.append(
+                f"the notification was sent as company "
+                f"{sent[0].get('company_id')!r}, not {ceo.company_id}")
+
+        landed = db.query(ChatMessage).filter(
+            ChatMessage.intent == "request_decided",
+            ChatMessage.session_id.in_([asked_in.id, console.id]),
+        ).all()
+        for m in landed:
+            made.append(m)
+
+        if not landed:
+            problems.append("the decision was never written to any thread")
+        elif any(m.session_id == console.id for m in landed):
+            problems.append(
+                "the decision landed in the CONSOLE thread — the `kind` "
+                "filter is missing from chat.py resolve_request")
+        elif not all(m.session_id == asked_in.id for m in landed):
+            problems.append("the decision landed in an unexpected thread")
+    finally:
+        # Children before parents; a rollback here would undo the
+        # deletes already flushed (see check_cv for that lesson).
+        db.rollback()
+        for cls_name in ("ChatMessage", "HrRequest", "ChatSession"):
+            for obj in made:
+                if type(obj).__name__ != cls_name:
+                    continue
+                try:
+                    db.delete(obj)
+                    db.flush()
+                except Exception:                               # noqa: BLE001
+                    db.rollback()
+        db.commit()
+
+    return problems
+
+
 def main() -> int:
     db = SessionLocal()
 
@@ -442,10 +676,23 @@ def main() -> int:
           f"{emp.joining_date}) at {ceo.company_name}\n")
 
     # Cases built from this employee's own payslips — see payslip_cases
-    cases = (CASES + payslip_cases(db, staff)
+    zero = zero_salary_case(db, staff)
+    if not zero:
+        print("  (koi zero-salary payslip nahi — 'why zero' case skip)")
+    cases = (CASES + zero + payslip_cases(db, staff)
              + security_cases(db, emp, staff))
 
     fails = []
+
+    # ── No model needed, so it runs first ──
+    routing = thread_routing_case(db, ceo)
+    print(f"[{'ok  ' if not routing else 'FAIL'}] "
+          f"{'thread routing':20} a decision lands in the thread it was "
+          f"asked in")
+    if routing:
+        fails.append(("thread routing", routing))
+        print(f"        >> {routing}")
+
     for case in cases:
         label, question, banned = case[:3]
         must_use = case[3] if len(case) > 3 else None
@@ -489,7 +736,7 @@ def main() -> int:
             print(f"        tools: {used}")
             print(f"        {out['reply'][:220]}")
 
-    total = len(cases) + len(CONVERSATIONS)
+    total = len(cases) + len(CONVERSATIONS) + 1   # +1: thread routing
     print("\n" + "=" * 56)
     print(f"FAILED {len(fails)} / {total}" if fails
           else f"ALL {total} HELP DESK CHECKS PASSED")

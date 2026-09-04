@@ -37,6 +37,8 @@ from sqlalchemy import (
     ForeignKey, Index,
 )
 from app.database import Base
+from app.utils.encrypted_column import (
+    encrypted_chat_json, encrypted_chat_text)
 from datetime import datetime
 
 
@@ -53,6 +55,24 @@ class ChatSession(Base):
     __tablename__ = "chat_sessions"
     __table_args__ = (
         Index("ix_chat_session_employee", "employee_id", "last_active_at"),
+        # ══════════════════════════════════════════════
+        # UNINDEXED FOREIGN KEY thi
+        # ══════════════════════════════════════════════
+        # Har doosri tenant table par `company_id` indexed hai —
+        # `chat_messages`, `hr_requests`, `hr_cases`, aur
+        # `recruitment.py` ka `_company_fk()` to `index=True` khud
+        # laga deta hai. Yeh ek reh gayi thi.
+        #
+        # Query ki raftaar iska asal maqsad NAHI hai: har query
+        # `employee_id` par bhi filter karti hai, jo ek shakhs tak
+        # narrow kar deta hai — us ke baad `company_id` chand rows par
+        # sasta filter hai.
+        #
+        # Asal wajah FK hai. `company_id` par `ON DELETE RESTRICT` hai,
+        # aur Postgres ko har company delete/update par yeh table scan
+        # karni parti hai ke koi child row to nahi. Index ke baghair wo
+        # poori table ka sequential scan hai.
+        Index("ix_chat_sessions_company", "company_id"),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -70,7 +90,15 @@ class ChatSession(Base):
     # "console", and neither can see the other's rows.
     kind = Column(String, nullable=False, default="employee")
 
-    title = Column(String, nullable=True)
+    # ══════════════════════════════════════════════
+    # Encrypted at rest
+    # ══════════════════════════════════════════════
+    # The title IS the first question, word for word — "Why was my
+    # August salary zero?", "I have a problem with my manager". Reading
+    # only the sidebar already tells you most of what somebody asked, so
+    # encrypting the transcript and leaving this in plain text would
+    # have been a door beside a locked one.
+    title = Column(encrypted_chat_text(), nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     last_active_at = Column(DateTime, default=datetime.utcnow)
@@ -119,7 +147,21 @@ class ChatMessage(Base):
     # employee | hr   — never "assistant"/"bot": an employee reading their
     # own transcript should see who they were talking to, not what it was
     role = Column(String, nullable=False)
-    text = Column(Text, nullable=False)
+
+    # ══════════════════════════════════════════════
+    # Encrypted at rest — see utils/encrypted_column.py
+    # ══════════════════════════════════════════════
+    # These rows hold salary figures, sick-leave reasons and complaints
+    # about named people. A database dump, a stolen backup or a SQL
+    # injection that reads this table used to hand over all of it in
+    # plain text.
+    #
+    # `EncryptedText` handles it in the column rather than at the call
+    # sites, so nothing here or anywhere else has to remember — and a
+    # route added next year cannot get it wrong. `role`, `intent` and
+    # `sources` stay readable: they are tool names and labels, and
+    # leaving them alone keeps the audit trail queryable.
+    text = Column(encrypted_chat_text(), nullable=False)
 
     # ──── What the reply was built from ────
     # `intent` and `sources` are the audit trail: when someone says "the
@@ -167,8 +209,18 @@ class HrRequest(Base):
     # document | advance | correction | complaint | question | other
     kind = Column(String, nullable=False, default="other")
 
-    subject = Column(String, nullable=False)
-    body = Column(Text, nullable=True)
+    # ══════════════════════════════════════════════
+    # Encrypted at rest — see utils/encrypted_column.py
+    # ══════════════════════════════════════════════
+    # Yehi wo matn hai jo transcript se nikal kar yahan aata hai:
+    # "Issue with Zeeshan", "confidential chat request regarding...".
+    # Chat encrypt karke isay chhorna ek taale ke pehlu mein khula
+    # darwaza hota — wohi shikayat, sirf doosri table mein.
+    #
+    # `kind`, `source` aur `status` plain hain: wo labels hain aur un par
+    # queries filter karti hain (`chat.py:422` status par).
+    subject = Column(encrypted_chat_text(), nullable=False)
+    body = Column(encrypted_chat_text(), nullable=True)
 
     # chat | form  — where it came from, so the CEO knows the context
     source = Column(String, nullable=False, default="chat")
@@ -176,7 +228,8 @@ class HrRequest(Base):
     # open | resolved | rejected
     status = Column(String, nullable=False, default="open")
 
-    ceo_note = Column(Text, nullable=True)
+    # CEO ka jawab — rad karne ki wajah bhi isi mein hoti hai.
+    ceo_note = Column(encrypted_chat_text(), nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     resolved_at = Column(DateTime, nullable=True)
@@ -229,13 +282,27 @@ class HrCase(Base):
     # gathering → ready → raised → resolved → closed
     stage = Column(String, nullable=False, default="gathering")
 
-    subject = Column(String, nullable=True)
+    # Employee ka apna sawal, jyun ka tyun — encrypted.
+    subject = Column(encrypted_chat_text(), nullable=True)
 
     # ──── The file itself ────
     # `facts` is what has been established, as {question: answer}.
     # `still_needed` is what the playbook wanted and has not been told.
-    facts = Column(JSON, nullable=True)
-    still_needed = Column(JSON, nullable=True)
+    #
+    # ⚠ YE DONO BHI TRANSCRIPT HI HAIN.
+    # `facts` mein employee ke apne alfaz hote hain, us sawal ke saath
+    # jo pucha gaya tha:
+    #
+    #   {"am i absent yesterday?": "yes", "Which date?": "September 5"}
+    #
+    # Sirf `subject` encrypt karna aur inhein chhor dena bay-maani hota
+    # — asal baat inhi mein hai.
+    #
+    # `concern`, `posture` aur `stage` plain hain, aur ye jaan-boojh kar
+    # hai: wo labels hain aur `chat_cases.py:116` `concern` par filter
+    # karta hai — encrypt karte to wo query chup-chaap kuch na deti.
+    facts = Column(encrypted_chat_json(), nullable=True)
+    still_needed = Column(encrypted_chat_json(), nullable=True)
 
     # Set from the posture, but kept separately: an employee can ask for
     # something to be treated in confidence whatever its concern.

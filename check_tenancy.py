@@ -120,12 +120,40 @@ def section_schema():
         else:
             ok("every tenant table has a foreign key to `companies`")
 
-        idx = c.execute(text("""
-            SELECT COUNT(*) FROM pg_indexes
-             WHERE schemaname='public' AND indexdef ILIKE '%company_id%'
-        """)).scalar()
-        ok(f"{idx} indexes cover company_id "
-           f"(the filter is on every query now, so it has to be indexed)")
+        # ═══ THIS USED TO COUNT, WHICH IS NOT CHECKING ═══
+        # The old version was:
+        #
+        #     idx = SELECT COUNT(*) ... indexdef ILIKE '%company_id%'
+        #     ok(f"{idx} indexes cover company_id")
+        #
+        # It called `ok()` unconditionally. It reported a healthy-looking
+        # "36 indexes cover company_id" for months while `chat_sessions`
+        # had none at all — a count says nothing about WHICH table is
+        # missing one, and a check that cannot fail is not a check.
+        #
+        # Every one of these columns carries a foreign key to `companies`
+        # with ON DELETE RESTRICT, so Postgres has to scan the child
+        # table on every company delete or update. Unindexed, that is a
+        # sequential scan of the whole table. (Query speed is a lesser
+        # reason: most queries also filter something more selective.)
+        unindexed = []
+        for t in sorted(db_tables):
+            has = c.execute(text("""
+                SELECT 1 FROM pg_index i
+                 WHERE i.indrelid = CAST(:t AS regclass)
+                   AND (SELECT attname FROM pg_attribute
+                         WHERE attrelid = i.indrelid
+                           AND attnum = i.indkey[0]) = :col
+            """), {"t": t, "col": TENANT_COLUMN}).first()
+            if not has:
+                unindexed.append(t)
+        if unindexed:
+            fail(f"company_id is a foreign key but has no index on: "
+                 f"{unindexed} — every company delete sequentially scans "
+                 f"these")
+        else:
+            ok(f"all {len(db_tables)} tenant tables index company_id "
+               f"as the leading column")
 
 
 # ══════════════════════════════════════════════

@@ -491,8 +491,20 @@ def resolve_request(
     # ──── The answer lands back in the employee's own thread ────
     # They asked in the chat; they should be told in the chat, not have to
     # go hunting for a status somewhere else.
+    # ⚠ `kind` FILTER YAHAN LAZMI HAI.
+    # `/chat/message` par `Depends(get_tenant)` hai, yani CEO bhi ye help
+    # desk use kar sakta hai — aur uska console thread hamesha zyada
+    # recent hota hai (ek CEO ke console mein 70 messages the jab yeh
+    # pakda gaya). Bina filter ke ye query us console thread ko chun leti
+    # thi, to "Your request has been approved" console transcript mein
+    # gir jata aur jis thread mein sawal poocha gaya tha wahan jawab
+    # kabhi na aata.
+    #
+    # Leak nahi tha — wohi shakhs, wohi company. Magar comment upar
+    # "employee's own thread" kehta hai, aur code kuch aur karta tha.
     session = db.query(ChatSession).filter(
-        ChatSession.employee_id == req.employee_id
+        ChatSession.employee_id == req.employee_id,
+        ChatSession.kind == "employee",
     ).order_by(ChatSession.last_active_at.desc()).first()
 
     if session:
@@ -517,7 +529,13 @@ def resolve_request(
 
         if employee and employee.email:
             notify.send_email(
-                company_id=company_id,
+                # `ceo.company_id`, not a bare `company_id` — that name
+                # does not exist in this function. It raised NameError on
+                # EVERY call, the `except` below printed it, and the
+                # employee was simply never emailed that their request
+                # had been answered. Nothing failed loudly enough for
+                # anyone to look.
+                company_id=ceo.company_id,
                 to=employee.email,
                 subject=f"HR request {status} — {req.subject}",
                 body=(
