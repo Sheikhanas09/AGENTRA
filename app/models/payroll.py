@@ -410,6 +410,21 @@ class LoanRepayment(Base):
     )
 
     id = Column(Integer, primary_key=True, index=True)
+
+    # ══════════════════════════════════════════════
+    # The tenant column
+    # ══════════════════════════════════════════════
+    # This table reached its company only through its parent row. The
+    # routes do look the parent up first and that lookup IS scoped, so
+    # there was no known way in — but that is a fact about today's
+    # routes. A table without `company_id` is one NEITHER wall can
+    # protect: the ORM guard skips it, and no row-level-security policy
+    # can be written for it.
+    company_id = Column(
+        Integer, ForeignKey("companies.id", ondelete="RESTRICT"),
+        nullable=True, index=True,
+    )
+
     loan_id = Column(Integer, ForeignKey("employee_loans.id", ondelete="CASCADE"),
                      nullable=False)
     run_id = Column(Integer, ForeignKey("payroll_runs.id", ondelete="CASCADE"),

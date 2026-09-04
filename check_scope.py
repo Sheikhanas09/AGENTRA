@@ -104,7 +104,17 @@ check("no company-wide tool returns a transcript",
 
 # ══════════════════════════════════════════════
 print("\n5. Only the employed are paid or written to")
-from app.database import SessionLocal
+# ──── This script works across companies, and says so ────
+# The tenant guard refuses any query on a session that has not declared
+# which company it is for. These tools audit or repair the whole
+# database, so crossing companies IS the job — the point is that it is
+# declared rather than assumed, and appears in the list
+# `check_tenancy.py` prints.
+from app.utils.tenancy import unscoped_session
+
+
+def SessionLocal():          # noqa: N802  (same name, declared scope)
+    return unscoped_session("check_scope: audits the boundary across every company")
 from app.models.user import User
 from app.utils.company import company_employees
 from app.utils.workforce import employed, former, may_receive_mail, unclassified
@@ -288,13 +298,32 @@ PROMPTS = {
 # 41,903.93 / 61713.48 / 128,571.43 — a figure with money's shape
 _MONEY = _re.compile(r"\b\d{1,3}(,\d{3})+(\.\d+)?\b|\b\d+\.\d{2}\b")
 
+# ══════════════════════════════════════════════
+# Words that are not identifying, whoever is called them
+# ══════════════════════════════════════════════
+# The check splits every real name into tokens and looks for them in the
+# prompts. A person called "Mark", "Grace", "Bill" or "Will" therefore
+# makes it fail on ordinary English, and a test account called "Zeta
+# Employee" made all four prompts fail on the word "employee" — which
+# every prompt in an HR system contains by necessity.
+#
+# The point of the check is to catch a REAL PERSON leaking into a prompt
+# and coming back out as a fabricated answer. A word this system uses in
+# its own sentences cannot do that, so it is not evidence.
+_NOT_A_NAME = {
+    "employee", "employees", "manager", "admin", "test", "user", "staff",
+    "company", "team", "leave", "grace", "mark", "will", "bill", "may",
+    "june", "july", "april", "march", "hope", "chance", "sunny",
+}
+
 db = SessionLocal()
 try:
     names = set()
     for u in db.query(User).all():
         for part in (u.full_name or "").split():
-            if len(part) >= 4:
-                names.add(part.lower())
+            token = part.lower()
+            if len(part) >= 4 and token not in _NOT_A_NAME:
+                names.add(token)
 
     for label, text in PROMPTS.items():
         money = sorted(set(m.group(0) for m in _MONEY.finditer(text or "")))
@@ -309,14 +338,17 @@ finally:
 
 # ══════════════════════════════════════════════
 print("\n10. No source file contains a control character")
-# Three times now, a regex written through a shell heredoc has arrived
+# Four times now, a regex written through a shell heredoc has arrived
 # with `\b` turned into \x08 — a literal backspace. Each time the line
 # looked correct in the editor, in grep and in the terminal, and each
 # time it silently never matched:
 #
 #   Chunk 36   a chat pattern that stopped catching anything
 #   Chunk 37   the same, in the filler stripper
-#   here       "what about the whole company?" kept the old scope
+#   Chunk 46   "what about the whole company?" kept the old scope
+#   Chunk 55   `_MONEY_IN_REPLY` in check_chat.py — the money pattern
+#              matched nothing, so the fabrication guard it was written
+#              for would have passed everything. This section caught it.
 #
 # The eye cannot see this and review cannot catch it, so it is checked
 # by ordinal. Tab, newline and carriage return are the only control

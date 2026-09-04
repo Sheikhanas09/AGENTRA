@@ -18,3 +18,16 @@ __pycache__/
 # ke liye git history mein daal deta.
 app/uploads/
 uploads/
+
+# ──── Database dumps ────
+# A pg_dump holds every password hash, salary and medical certificate in
+# the system. `migrate_multitenant.py` suggests taking one before it
+# runs, so this makes sure the suggestion cannot end up in the repo.
+*.sql
+backup_*.sql
+
+# ──── Removed secrets, kept only as a local safety copy ────
+# `app/token.json` was the one shared Google token. It now lives
+# encrypted in `company_integrations`, per company. This is the copy
+# taken the day it was removed — delete it once you have reconnected.
+_secrets_backup/

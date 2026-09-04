@@ -128,6 +128,21 @@ class FaceEnrollment(Base):
     __tablename__ = "face_enrollment"
 
     id = Column(Integer, primary_key=True, index=True)
+
+    # ══════════════════════════════════════════════
+    # The tenant column
+    # ══════════════════════════════════════════════
+    # This table reached its company only through its parent row. The
+    # routes do look the parent up first and that lookup IS scoped, so
+    # there was no known way in — but that is a fact about today's
+    # routes. A table without `company_id` is one NEITHER wall can
+    # protect: the ORM guard skips it, and no row-level-security policy
+    # can be written for it.
+    company_id = Column(
+        Integer, ForeignKey("companies.id", ondelete="RESTRICT"),
+        nullable=True, index=True,
+    )
+
     employee_id = Column(Integer, ForeignKey("users.id"), unique=True)
     embedding = Column(JSON, nullable=False)
     enrolled_at = Column(DateTime, default=datetime.utcnow)
@@ -212,6 +227,19 @@ class AttendanceInterval(Base):
     )
     employee_id = Column(Integer, nullable=False)
     type = Column(Enum(IntervalTypeEnum), nullable=False)
+    # ══════════════════════════════════════════════
+    # The tenant column
+    # ══════════════════════════════════════════════
+    # This table reached its company only through its parent row. In
+    # practice the routes look the parent up first and that lookup is
+    # scoped, so there was no known way in — but "no known way in" is a
+    # fact about today's routes. A table without `company_id` is one
+    # NEITHER wall can protect: the ORM guard skips it, and no
+    # row-level-security policy can be written for it.
+    company_id = Column(
+        Integer, ForeignKey("companies.id", ondelete="RESTRICT"),
+        nullable=True, index=True,
+    )
     start_time = Column(DateTime, nullable=False)
     end_time = Column(DateTime, nullable=True)
     duration_minutes = Column(Float, nullable=True)
@@ -425,6 +453,19 @@ class PolicyDecisionLog(Base):
     __tablename__ = "policy_decisions_log"
 
     id = Column(Integer, primary_key=True, index=True)
+
+    # ══════════════════════════════════════════════
+    # The tenant column
+    # ══════════════════════════════════════════════
+    # The audit trail of leave decisions — it holds the retrieved policy
+    # text and the prompt sent to the model, which is company material.
+    # It reached its company only through the leave request, so neither
+    # the ORM guard nor a row-level-security policy could cover it.
+    company_id = Column(
+        Integer, ForeignKey("companies.id", ondelete="RESTRICT"),
+        nullable=True, index=True,
+    )
+
     leave_request_id = Column(Integer, ForeignKey("leave_requests.id"), nullable=False)
     policy_id = Column(Integer, ForeignKey("company_policies.id"), nullable=True)
     retrieval_query = Column(Text, nullable=True)

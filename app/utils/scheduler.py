@@ -122,29 +122,34 @@ def job_process_overdue_leaves():
     This used to run only when someone opened a leave listing.
     Now it happens whether or not anyone opens the app.
     """
-    from app.database import SessionLocal
-    from app.models.attendance import LeaveRequest, LeaveStatusEnum
     from app.routes.leave import _auto_approve_overdue
+    from app.utils.tenancy import (
+        live_company_ids, open_tenant_session, open_unscoped_session,
+    )
 
-    db = SessionLocal()
-    try:
-        companies = [
-            row[0] for row in db.query(LeaveRequest.company_id)
-            .filter(LeaveRequest.status == LeaveStatusEnum.pending)
-            .distinct().all()
-        ]
+    # ═══ THE LIST OF COMPANIES CAME FROM THE DATA ═══
+    # `DISTINCT company_id FROM leave_requests` — so a company that had
+    # not yet had a single leave request was not in the list, and its
+    # requests were therefore never swept. The first one would sit
+    # pending until somebody opened a screen. The companies table is the
+    # only thing that knows which companies exist.
+    with open_unscoped_session("scheduler: listing companies to sweep") as db:
+        companies = live_company_ids(db)
 
-        total = 0
-        for company_id in companies:
-            try:
+    total = 0
+    for company_id in companies:
+        # One scoped session PER COMPANY. Anything inside this block is
+        # confined to that company by the tenant guard, so a query in
+        # the leave code written without a company filter still cannot
+        # reach across.
+        try:
+            with open_tenant_session(company_id) as db:
                 total += _auto_approve_overdue(db, company_id)
-            except Exception as e:
-                db.rollback()
-                print(f"[scheduler] company {company_id} auto-approve failed: {e}")
+                db.commit()
+        except Exception as e:                          # noqa: BLE001
+            print(f"[scheduler] company {company_id} auto-approve failed: {e}")
 
-        return f"{total} auto-approved" if total else None
-    finally:
-        db.close()
+    return f"{total} auto-approved" if total else None
 
 
 # Remind the CEO this many hours before the deadline
@@ -164,21 +169,27 @@ def job_leave_reminders():
     from app.routes.leave import _auto_approve_hours, _leave_type_label
     from app.utils import notify
 
-    db = SessionLocal()
+    from app.utils.tenancy import (
+        live_company_ids, open_unscoped_session, bind_tenant,
+    )
+
     sent = 0
+    cm = open_unscoped_session("scheduler: listing companies to remind")
+    db = cm.__enter__()
 
     try:
         now = get_pkt_now()
 
-        companies = [
-            row[0] for row in db.query(LeaveRequest.company_id)
-            .filter(
-                LeaveRequest.status == LeaveStatusEnum.pending,
-                LeaveRequest.reminder_sent_at == None,
-            ).distinct().all()
-        ]
+        # From the companies table, not from whichever companies happen
+        # to have data. See `job_process_overdue_leaves` for the whole
+        # story — a company with no leave requests yet was invisible.
+        companies = live_company_ids(db)
 
         for company_id in companies:
+            # Narrow the session to this company for the rest of the
+            # iteration, so every query below is confined to it whether
+            # or not it says so itself.
+            bind_tenant(db, company_id)
             policy = db.query(CompanyWorkPolicy).filter(
                 CompanyWorkPolicy.company_id == company_id
             ).first()
@@ -200,7 +211,10 @@ def job_leave_reminders():
             if not due:
                 continue
 
-            ceo = db.query(User).filter(User.id == company_id).first()
+            # By `company_id` — a company is not its CEO's user row.
+            ceo = db.query(User).filter(
+                User.company_id == company_id, User.role == "ceo"
+            ).first()
             if not ceo or not ceo.email:
                 continue
 
@@ -222,6 +236,7 @@ def job_leave_reminders():
                 })
 
             if notify.leave_reminder_to_ceo(
+                company_id=company_id,
                 ceo_email=ceo.email,
                 ceo_name=ceo.full_name or "CEO",
                 pending=rows,
@@ -240,7 +255,7 @@ def job_leave_reminders():
         db.rollback()
         raise
     finally:
-        db.close()
+        cm.__exit__(None, None, None)
 
 
 def register_jobs():
@@ -376,15 +391,28 @@ def job_monthly_payroll():
         return
 
     period = _previous_period(today)
-    db = SessionLocal()
+
+    from app.utils.tenancy import open_unscoped_session, bind_tenant
+    cm = open_unscoped_session("payroll: listing companies to run")
+    db = cm.__enter__()
 
     try:
-        # Only companies that have actually set payroll up
-        company_ids = [
-            row[0] for row in db.query(SalaryStructure.company_id).distinct().all()
-        ]
+        # ═══ AND THE SAME BUG AGAIN, IN PAYROLL ═══
+        # `DISTINCT company_id FROM salary_structures`, described as
+        # "only companies that have actually set payroll up". A company
+        # whose CEO had not yet entered a single salary structure was
+        # invisible to this job — which is the same set of companies
+        # that most needs to find out payroll has not been set up.
+        from app.utils.tenancy import live_company_ids
+        company_ids = live_company_ids(db)
 
         for company_id in company_ids:
+            # Scoped to this company for the rest of the loop body — the
+            # payroll code below reads attendance, leave and salary
+            # structures and then writes payslips, and none of that may
+            # reach across.
+            bind_tenant(db, company_id)
+
             existing = db.query(PayrollRun).filter(
                 PayrollRun.company_id == company_id,
                 PayrollRun.period == period,
@@ -393,8 +421,16 @@ def job_monthly_payroll():
             if existing:
                 continue          # this month's work is already done
 
-            ceo = db.query(User).filter(User.id == company_id).first()
+            # ═══ THIS ASSUMED A COMPANY *WAS* ITS CEO'S USER ROW ═══
+            # `User.id == company_id`. True for the companies that
+            # existed before this change and false for every one since,
+            # so the lookup returned None and payroll silently did not
+            # run — for exactly the newest companies.
+            ceo = db.query(User).filter(
+                User.company_id == company_id, User.role == "ceo"
+            ).first()
             if not ceo:
+                print(f"[payroll] company {company_id} has no CEO — skipped")
                 continue
 
             print(f"[payroll] {period} — running payroll automatically for "
@@ -431,7 +467,7 @@ def job_monthly_payroll():
                     print(f"[payroll] email fail: {e}")
 
     finally:
-        db.close()
+        cm.__exit__(None, None, None)
 
 
 def _run_payroll_for(db, ceo, period: str):
@@ -449,12 +485,12 @@ def _run_payroll_for(db, ceo, period: str):
     from app.utils.workforce import employed_during
 
     # Not everyone employed today — everyone employed THAT month.
-    employees = employed_during(db, ceo.id, period)
+    employees = employed_during(db, ceo.company_id, period)
     if not employees:
         return None
 
     run = PayrollRun(
-        company_id=ceo.id, period=period, attempt=1,
+        company_id=ceo.company_id, period=period, attempt=1,
         triggered_by="scheduler", status="processing",
         employees_total=len(employees),
     )
@@ -465,7 +501,7 @@ def _run_payroll_for(db, ceo, period: str):
     gross = ded = net = Decimal("0.00")
 
     for emp in employees:
-        out = run_for_employee(db, emp.id, ceo.id, period, run.id)
+        out = run_for_employee(db, emp.id, ceo.company_id, period, run.id)
         if out["status"] == "computed":
             done += 1
             gross += out["gross_pay"]
@@ -539,6 +575,7 @@ def _notify_hold(ceo, period, run, reasons):
         return
     try:
         notify.send_email(
+            company_id=ceo.company_id,
             to=ceo.email,
             subject=f"Payroll {period} - your response is needed",
             body=(

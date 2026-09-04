@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from app.database import get_db
+from app.utils.tenancy import Tenant, get_tenant, require_ceo
 from app.utils.security import get_current_user
 from app.utils.pkt import get_pkt_now, get_pkt_today
 from app.utils.workpolicy import count_working_days
@@ -386,8 +387,20 @@ def sync_balances_to_config(db: Session, company_id: int, cfg: CompanyLeaveType,
 
 
 def _company_ceo(db: Session, company_id: int) -> Optional[User]:
-    """The CEO record for notifications — company_id IS their user id"""
-    return db.query(User).filter(User.id == company_id).first()
+    """
+    The CEO of this company, for notifications.
+
+    ═══ THE DOCSTRING USED TO SAY IT OUT LOUD ═══
+        "The CEO record for notifications — company_id IS their user id"
+        return db.query(User).filter(User.id == company_id).first()
+
+    It was true, and then it was not. A company registered after the
+    multi-tenant change has an id from 1000 up while its CEO has an
+    ordinary user id, so this returned None — and every leave
+    notification to that CEO stopped, silently.
+    """
+    return db.query(User).filter(
+        User.company_id == company_id, User.role == "ceo").first()
 
 
 def _leave_type_label(db: Session, company_id: int, code: str) -> str:
@@ -525,6 +538,7 @@ def _auto_approve_overdue(db: Session, company_id: int) -> int:
             emp = item["employee"]
             if emp and emp.email:
                 notify.leave_decision_to_employee(
+                    company_id=company_id,
                     employee_email=emp.email,
                     employee_name=emp.full_name or "Employee",
                     decision="approved",
@@ -536,6 +550,7 @@ def _auto_approve_overdue(db: Session, company_id: int) -> int:
                 )
             if ceo and ceo.email:
                 notify.leave_auto_approved_to_ceo(
+                    company_id=company_id,
                     ceo_email=ceo.email,
                     ceo_name=ceo.full_name or "CEO",
                     employee_name=emp.full_name if emp else "Employee",
@@ -679,7 +694,7 @@ async def submit_leave_request(
     #   `_validate_reason()` below returns a 400 with a clear message.
     medical_certificate: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: Tenant = Depends(get_tenant)
 ):
     """
     Employee leave request kare → Leave Agent (RAG + LLM) evaluate karega.
@@ -825,6 +840,7 @@ async def submit_leave_request(
         ceo = _company_ceo(db, company_id)
         if ceo and ceo.email:
             notify.leave_submitted_to_ceo(
+                company_id=company_id,
                 ceo_email=ceo.email,
                 ceo_name=ceo.full_name or "CEO",
                 employee_name=employee.full_name or "Employee",
@@ -957,15 +973,15 @@ def get_pending_leaves(
     ceo = get_user_or_404(db, current_user["user_id"])
 
     # ──── Settle any requests that have passed their deadline first ────
-    _run_auto_approve(db, ceo.id)
+    _run_auto_approve(db, ceo.company_id)
 
     pending = db.query(LeaveRequest).filter(
-        LeaveRequest.company_id == ceo.id,
+        LeaveRequest.company_id == ceo.company_id,
         LeaveRequest.status == LeaveStatusEnum.pending
     ).order_by(LeaveRequest.created_at.desc()).all()
 
     policy = db.query(CompanyWorkPolicy).filter(
-        CompanyWorkPolicy.company_id == ceo.id
+        CompanyWorkPolicy.company_id == ceo.company_id
     ).first()
     auto_hours = _auto_approve_hours(policy)
 
@@ -1008,7 +1024,7 @@ def approve_leave(
 
     leave_req = db.query(LeaveRequest).filter(
         LeaveRequest.id == leave_id,
-        LeaveRequest.company_id == ceo.id,
+        LeaveRequest.company_id == ceo.company_id,
         LeaveRequest.status == LeaveStatusEnum.pending
     ).first()
 
@@ -1040,6 +1056,7 @@ def approve_leave(
     employee = db.query(User).filter(User.id == leave_req.employee_id).first()
     if employee and employee.email:
         notify.leave_decision_to_employee(
+            company_id=company_id,
             employee_email=employee.email,
             employee_name=employee.full_name or "Employee",
             decision="approved",
@@ -1075,7 +1092,7 @@ def reject_leave(
 
     leave_req = db.query(LeaveRequest).filter(
         LeaveRequest.id == leave_id,
-        LeaveRequest.company_id == ceo.id,
+        LeaveRequest.company_id == ceo.company_id,
         LeaveRequest.status == LeaveStatusEnum.pending
     ).first()
 
@@ -1101,6 +1118,7 @@ def reject_leave(
     employee = db.query(User).filter(User.id == leave_req.employee_id).first()
     if employee and employee.email:
         notify.leave_decision_to_employee(
+            company_id=company_id,
             employee_email=employee.email,
             employee_name=employee.full_name or "Employee",
             decision="rejected",
@@ -1122,7 +1140,7 @@ def cancel_leave(
     leave_id: int,
     data: CancelSchema,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: Tenant = Depends(get_tenant)
 ):
     """
     A pending request can be cancelled at any time.
@@ -1175,6 +1193,7 @@ def cancel_leave(
     employee = db.query(User).filter(User.id == leave_req.employee_id).first()
     if ceo and ceo.email and employee:
         notify.leave_cancelled_to_ceo(
+            company_id=company_id,
             ceo_email=ceo.email,
             ceo_name=ceo.full_name or "CEO",
             employee_name=employee.full_name or "Employee",
@@ -1200,7 +1219,7 @@ def get_leave_balance(
     employee_id: int,
     year: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: Tenant = Depends(get_tenant)
 ):
     employee = assert_can_view(db, current_user, employee_id)
     year = year or get_pkt_today().year
@@ -1255,7 +1274,7 @@ def get_leave_history(
     status: Optional[str] = None,
     limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: Tenant = Depends(get_tenant)
 ):
     employee = assert_can_view(db, current_user, employee_id)
     company_id = resolve_company_id(db, employee)
@@ -1295,10 +1314,10 @@ def adjust_balance(
 ):
     assert_can_view(db, current_user, data.employee_id)
     ceo = get_user_or_404(db, current_user["user_id"])
-    leave_type = _validate_leave_type(db, ceo.id, data.leave_type).code
+    leave_type = _validate_leave_type(db, ceo.company_id, data.leave_type).code
     year = get_pkt_today().year
 
-    balance = get_or_create_balance(db, data.employee_id, ceo.id, leave_type, year)
+    balance = get_or_create_balance(db, data.employee_id, ceo.company_id, leave_type, year)
 
     new_entitlement = (balance.total_entitlement or 0) + data.adjustment
     if new_entitlement < 0:
@@ -1331,9 +1350,9 @@ def get_all_leaves(
     current_user: dict = Depends(require_ceo)
 ):
     ceo = get_user_or_404(db, current_user["user_id"])
-    _run_auto_approve(db, ceo.id)
+    _run_auto_approve(db, ceo.company_id)
 
-    query = db.query(LeaveRequest).filter(LeaveRequest.company_id == ceo.id)
+    query = db.query(LeaveRequest).filter(LeaveRequest.company_id == ceo.company_id)
     if status:
         query = query.filter(LeaveRequest.status == status)
     if employee_id:
@@ -1342,7 +1361,7 @@ def get_all_leaves(
     requests = query.order_by(LeaveRequest.created_at.desc()).limit(limit).all()
 
     policy = db.query(CompanyWorkPolicy).filter(
-        CompanyWorkPolicy.company_id == ceo.id
+        CompanyWorkPolicy.company_id == ceo.company_id
     ).first()
 
     employees = {e.id: e for e in company_employees(db, ceo)}
@@ -1380,7 +1399,7 @@ def get_leave_calendar(
         raise HTTPException(status_code=400, detail="Date format must be YYYY-MM-DD")
 
     approved = db.query(LeaveRequest).filter(
-        LeaveRequest.company_id == ceo.id,
+        LeaveRequest.company_id == ceo.company_id,
         LeaveRequest.status == LeaveStatusEnum.approved,
         LeaveRequest.start_date <= end,
         LeaveRequest.end_date >= start,
@@ -1402,7 +1421,7 @@ def get_leave_calendar(
 @router.get("/types")
 def list_leave_types(
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: Tenant = Depends(get_tenant)
 ):
     """
     The company's leave types. Employees see only enabled ones; the CEO
@@ -1467,20 +1486,20 @@ def upsert_leave_type(
     if data.default_entitlement < 0:
         raise HTTPException(status_code=400, detail="Entitlement cannot be negative")
 
-    get_leave_types(db, ceo.id)          # seed the defaults on first use
+    get_leave_types(db, ceo.company_id)          # seed the defaults on first use
 
     existing = db.query(CompanyLeaveType).filter(
-        CompanyLeaveType.company_id == ceo.id,
+        CompanyLeaveType.company_id == ceo.company_id,
         CompanyLeaveType.code == code
     ).first()
 
     created = existing is None
     if created:
         max_order = db.query(CompanyLeaveType).filter(
-            CompanyLeaveType.company_id == ceo.id
+            CompanyLeaveType.company_id == ceo.company_id
         ).count()
         existing = CompanyLeaveType(
-            company_id=ceo.id, code=code, sort_order=max_order + 1,
+            company_id=current_user["company_id"], code=code, sort_order=max_order + 1,
             source="manual",
         )
         db.add(existing)
@@ -1498,7 +1517,7 @@ def upsert_leave_type(
 
     # ──── Sync employees' existing balance rows too ────
     db.flush()
-    synced = sync_balances_to_config(db, ceo.id, existing)
+    synced = sync_balances_to_config(db, ceo.company_id, existing)
 
     db.commit()
     db.refresh(existing)
@@ -1555,7 +1574,7 @@ def extract_types_from_policy(
     ceo = get_user_or_404(db, current_user["user_id"])
 
     active_policy = db.query(CompanyPolicy).filter(
-        CompanyPolicy.company_id == ceo.id,
+        CompanyPolicy.company_id == ceo.company_id,
         CompanyPolicy.is_active == True
     ).first()
 
@@ -1567,7 +1586,7 @@ def extract_types_from_policy(
 
     try:
         from app.agents.policy_extraction_agent import extract_leave_types
-        result = extract_leave_types(ceo.id)
+        result = extract_leave_types(ceo.company_id)
     except Exception as e:
         print(f"Policy extraction failed: {e}")
         raise HTTPException(
@@ -1575,7 +1594,7 @@ def extract_types_from_policy(
             detail="The agent is unavailable — please create the types manually"
         )
 
-    existing = leave_type_map(db, ceo.id)
+    existing = leave_type_map(db, ceo.company_id)
     suggested_codes = {t["code"] for t in result["types"]}
 
     # ──── Match each suggestion against the current state ────
@@ -1739,7 +1758,7 @@ def apply_extracted_types(
 
     # ──── The same path the upload takes — behaviour must not diverge ────
     result = apply_policy_types(
-        db, ceo.id,
+        db, ceo.company_id,
         [
             {
                 "code": t.code,
@@ -1794,14 +1813,14 @@ def delete_leave_type(
     code = (code or "").strip().lower()
 
     cfg = db.query(CompanyLeaveType).filter(
-        CompanyLeaveType.company_id == ceo.id,
+        CompanyLeaveType.company_id == ceo.company_id,
         CompanyLeaveType.code == code
     ).first()
     if not cfg:
         raise HTTPException(status_code=404, detail="Leave type not found")
 
     used = db.query(LeaveRequest).filter(
-        LeaveRequest.company_id == ceo.id,
+        LeaveRequest.company_id == ceo.company_id,
         LeaveRequest.leave_type == code
     ).count()
 
@@ -1819,7 +1838,7 @@ def delete_leave_type(
 
     label = cfg.label
     db.query(LeaveBalance).filter(
-        LeaveBalance.company_id == ceo.id,
+        LeaveBalance.company_id == ceo.company_id,
         LeaveBalance.leave_type == code
     ).delete(synchronize_session=False)
     db.delete(cfg)
@@ -1848,7 +1867,7 @@ def process_overdue(
     is left waiting just because no one opened the app.
     """
     ceo = get_user_or_404(db, current_user["user_id"])
-    approved = _auto_approve_overdue(db, ceo.id)
+    approved = _auto_approve_overdue(db, ceo.company_id)
 
     return {
         "message": f"{approved} request(s) auto-approve ho gayin",
@@ -1863,7 +1882,7 @@ def process_overdue(
 def get_leave_certificate(
     leave_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: Tenant = Depends(get_tenant)
 ):
     """
     Certificates are served from the DB. Files from older requests (still

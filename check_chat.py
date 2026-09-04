@@ -31,7 +31,17 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app.agents.chat_agent import answer_message, _FILLER
-from app.database import SessionLocal
+# ──── This script works across companies, and says so ────
+# The tenant guard refuses any query on a session that has not declared
+# which company it is for. These tools audit or repair the whole
+# database, so crossing companies IS the job — the point is that it is
+# declared rather than assumed, and appears in the list
+# `check_tenancy.py` prints.
+from app.utils.tenancy import unscoped_session
+
+
+def SessionLocal():          # noqa: N802  (same name, declared scope)
+    return unscoped_session("check_chat: drives the employee help desk")
 from app.models.user import User
 from app.utils.payroll_data import month_label
 from app.utils.workforce import employed
@@ -175,7 +185,19 @@ def run(db, emp, question, history=None):
                           history=history or [])
 
 
-def judge(label, out, banned, must_use, must_say, action):
+# Money as it appears in a sentence: 111,500.09 / 100000.09 / 3,500
+#
+# WRITTEN WITH A PROPER TOOL, NOT A SHELL HEREDOC.
+# A first attempt went in through a heredoc and every backslash-b arrived as
+# a literal backspace (0x08) - invisible in an editor, in grep and in
+# a terminal, and the pattern then matched nothing at all. That is the
+# fourth time this project has hit it (chunks 36, 37, 46), and
+# check_scope.py section 10 exists precisely to catch it.
+_MONEY_IN_REPLY = re.compile(
+    r"\d{1,3}(?:,\d{3})+(?:\.\d{2})?|\d+\.\d{2}")
+
+
+def judge(label, out, banned, must_use, must_say, action, stored=None):
     reply = out["reply"]
     low = reply.lower()
     used = [s.get("name") for s in (out.get("sources") or []) if s]
@@ -190,6 +212,26 @@ def judge(label, out, banned, must_use, must_say, action):
         problems.append(f"used {used}, needed {must_use}")
     if must_say and not any(w.lower() in low for w in must_say):
         problems.append(f"says none of {list(must_say)}")
+
+    # ══════════════════════════════════════════════
+    # No figure in the answer that is not in the record
+    # ══════════════════════════════════════════════
+    # This is what the payslip cases were FOR, and it was never actually
+    # checked. The old version only required one stored number to be
+    # present — an answer could quote the total correctly and invent
+    # three more alongside it, and the case would pass.
+    #
+    # The reported failure was "deductions 25,000, net 75,000" for a
+    # month whose row holds 111,500.09 and 0.00. Two round numbers whose
+    # arithmetic works out is exactly what an invented answer looks
+    # like, and it is caught here rather than by hoping the right total
+    # appears.
+    if stored:
+        invented = [m for m in _MONEY_IN_REPLY.findall(reply)
+                    if m not in stored]
+        if invented:
+            problems.append(
+                f"figures not in the payslip: {invented[:4]}")
 
     if action == "none" and out.get("action"):
         problems.append(f"opened a {out['action'].get('type')} request")
@@ -244,6 +286,32 @@ def payslip_cases(db, staff):
         return [f"{amount:,.2f}", f"{amount:.2f}",
                 f"{amount:,.0f}" if amount == int(amount) else f"{amount:,.2f}"]
 
+    def every_stored_figure(slip):
+        """
+        Every money figure this payslip actually holds.
+
+        The fabrication guard compares against ALL of them, not one: an
+        answer that itemises "absence 100,000.09, tax 3,500, PF 8,000"
+        is quoting the record just as faithfully as one that states the
+        total, and must not be called a fabrication for choosing the
+        breakdown.
+        """
+        fields = [
+            slip.gross_pay, slip.net_salary, slip.total_deductions,
+            slip.base_salary, slip.allowances_total, slip.overtime_pay,
+            slip.incentive_pay, slip.arrears, slip.bonus, slip.commission,
+            slip.other_earnings, slip.late_deduction,
+            slip.undertime_deduction, slip.unpaid_leave_deduction,
+            slip.absent_deduction, slip.tax_deduction, slip.provident_fund,
+            slip.loan_deduction, slip.other_deductions,
+        ]
+        out = set()
+        for v in fields:
+            if v is None:
+                continue
+            out.update(both_forms(v))
+        return out
+
     cases = []
     for s in slips:
         label = month_label(s.period)
@@ -252,11 +320,20 @@ def payslip_cases(db, staff):
             f"What was my salary for {label}?",
             ALWAYS,
             "payslips",
-            # The deduction total as stored. Anything else is either a
-            # different month or a number nobody recorded.
-            both_forms(s.total_deductions),
+            # ⚠ ANY of the headline figures, not one particular one.
+            # This used to demand `total_deductions` alone. The desk
+            # answered "gross 100,000, net 0.00, absence 100,000.09, tax
+            # 3,500, PF 8,000" — every figure straight from the row, and
+            # more useful than the total — and the case failed it for
+            # choosing a breakdown over a sum.
+            #
+            # What must hold is that the answer QUOTES THE RECORD. Which
+            # of the record's figures it quotes is the desk's business.
+            both_forms(s.gross_pay) + both_forms(s.net_salary)
+            + both_forms(s.total_deductions),
             "none",
             emp,                      # asked as this person, not the default
+            every_stored_figure(s),   # <- the fabrication guard
         ))
     return cases
 
@@ -375,9 +452,11 @@ def main() -> int:
         must_say = case[4] if len(case) > 4 else None
         action = case[5] if len(case) > 5 else None
         asker = case[6] if len(case) > 6 else emp
+        stored = case[7] if len(case) > 7 else None
 
         out = run(db, asker, question)
-        problems, used = judge(label, out, banned, must_use, must_say, action)
+        problems, used = judge(label, out, banned, must_use, must_say,
+                               action, stored)
 
         ok = not problems
         print(f"[{'ok  ' if ok else 'FAIL'}] {label:20} {question[:50]}")

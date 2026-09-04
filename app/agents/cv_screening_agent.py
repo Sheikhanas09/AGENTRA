@@ -25,9 +25,30 @@ chroma_client = chromadb.PersistentClient(
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 
+# ══════════════════════════════════════════════
+# One vector collection per company
+# ══════════════════════════════════════════════
+# Every company's job descriptions used to live in ONE collection called
+# `job_descriptions`. Nothing leaked in practice, because the similarity
+# query passes `where={"job_id": job_id}` and the route that supplies
+# that id is now scoped — but the isolation rested entirely on a filter
+# in one expression, three layers below the request.
+#
+# The policy documents were already per company
+# (`company_{id}_policies`); this is the same rule applied to the other
+# collection. A company's roles, salary bands and required skills are
+# competitive information, and it should not be one dropped `where`
+# clause away from another company's index.
+def _job_collection(company_id: int):
+    return chroma_client.get_or_create_collection(
+        name=f"company_{company_id}_jobs")
+
+
 # ──── RAG: store the job description ────
-def store_job_in_vectordb(job_id: int, job_title: str, job_description: str, job_skills: str, job_keywords: str):
-    collection = chroma_client.get_or_create_collection(name="job_descriptions")
+def store_job_in_vectordb(company_id: int, job_id: int, job_title: str,
+                          job_description: str, job_skills: str,
+                          job_keywords: str):
+    collection = _job_collection(company_id)
     doc_id = f"job_{job_id}"
 
     full_job_text = f"""
@@ -58,9 +79,9 @@ def store_job_in_vectordb(job_id: int, job_title: str, job_description: str, job
 
 
 # ──── RAG: match the CV against the job ────
-def get_rag_similarity(job_id: int, cv_text: str) -> float:
+def get_rag_similarity(company_id: int, job_id: int, cv_text: str) -> float:
     try:
-        collection = chroma_client.get_or_create_collection(name="job_descriptions")
+        collection = _job_collection(company_id)
         cv_embedding = embedding_model.encode(cv_text[:2000]).tolist()
 
         results = collection.query(
@@ -83,6 +104,7 @@ def get_rag_similarity(job_id: int, cv_text: str) -> float:
 
 
 class CVScreeningState(TypedDict):
+    company_id: int          # which company's vector index to use
     candidate_id: int
     job_id: int
     candidate_name: str
@@ -104,6 +126,7 @@ class CVScreeningState(TypedDict):
 def rag_similarity_node(state: CVScreeningState) -> CVScreeningState:
     # ──── Store the job description in the vector DB ────
     store_job_in_vectordb(
+        company_id=state["company_id"],
         job_id=state["job_id"],
         job_title=state["job_title"],
         job_description=state["job_description"],
@@ -113,6 +136,7 @@ def rag_similarity_node(state: CVScreeningState) -> CVScreeningState:
 
     # ──── Match the CV to the job semantically ────
     rag_score = get_rag_similarity(
+        company_id=state["company_id"],
         job_id=state["job_id"],
         cv_text=state["cv_text"]
     )
@@ -206,12 +230,14 @@ cv_screening_graph = build_cv_screening_graph()
 
 
 def screen_cv(
+    company_id: int,
     candidate_id: int, job_id: int, candidate_name: str,
     candidate_email: str, cv_text: str, job_title: str,
     job_description: str, job_keywords: str,
     job_experience: str, job_skills: str,
 ) -> dict:
     initial_state: CVScreeningState = {
+        "company_id": company_id,
         "candidate_id": candidate_id, "job_id": job_id,
         "candidate_name": candidate_name, "candidate_email": candidate_email,
         "cv_text": cv_text, "job_title": job_title,

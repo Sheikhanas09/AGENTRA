@@ -243,7 +243,11 @@ def letter_context(db, employee_id: int, company_id: int) -> dict:
     if not u:
         return {}
 
-    ceo = db.query(User).filter(User.id == company_id).first()
+    # By `company_id` — a company is not its CEO's user row. This letter
+    # carries the CEO's name as the signatory, so getting None here put
+    # an unsigned letter in front of a bank.
+    ceo = db.query(User).filter(
+        User.company_id == company_id, User.role == "ceo").first()
     brand = db.query(CompanyBranding).filter(
         CompanyBranding.company_id == company_id).first()
     salary = db.query(SalaryStructure).filter(

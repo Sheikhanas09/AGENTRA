@@ -65,6 +65,21 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
         role: str = payload.get("role")
         if user_id is None:
             raise credentials_exception
-        return {"user_id": user_id, "role": role}
+        return {
+            "user_id": user_id,
+            "role": role,
+            # ══════════════════════════════════════════════
+            # A CLAIM, NOT AN ANSWER
+            # ══════════════════════════════════════════════
+            # This is what the token SAYS the company is. Nothing scopes
+            # a query with it. `utils/tenancy.get_tenant` re-reads the
+            # user row and compares the two, and a disagreement ends the
+            # request — a token minted before somebody was moved must
+            # not still reach the company they left.
+            #
+            # None for old tokens issued before this field existed, and
+            # for the superadmin, who is in no company.
+            "company_id": payload.get("company_id"),
+        }
     except JWTError:
         raise credentials_exception

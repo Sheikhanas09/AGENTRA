@@ -28,7 +28,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app.agents.chat_agent import _FILLER
 from app.agents.hr_console_agent import ask_console
-from app.database import SessionLocal
+# ──── This script works across companies, and says so ────
+# The tenant guard refuses any query on a session that has not declared
+# which company it is for. These tools audit or repair the whole
+# database, so crossing companies IS the job — the point is that it is
+# declared rather than assumed, and appears in the list
+# `check_tenancy.py` prints.
+from app.utils.tenancy import unscoped_session
+
+
+def SessionLocal():          # noqa: N802  (same name, declared scope)
+    return unscoped_session("check_console: drives the CEO console for one company")
 from app.models.payroll import Payslip
 from app.models.user import User
 
@@ -154,10 +164,21 @@ CASES = [
      GIVES_UP + ATTENDANCE_AS_PERFORMANCE, "performance_data"),
     # Both tools now carry records-vs-people, so either may answer —
     # what must not happen is meetings reported as people.
+    # ⚠ WORDING WAS THE WRONG THING TO CHECK.
+    # This demanded one of "record"/"records"/"meeting"/"separate". The
+    # console answered "We have interviewed 2 candidates. The interviews
+    # held include Muhammad Anas for two different roles..." — the right
+    # count AND the distinction, in words that were not on the list.
+    #
+    # That is the trap this project named in Chunk 51 after hitting it
+    # four times: counting the SHAPES an answer can take, and the model
+    # finding a new one. The substance is what matters — the number of
+    # PEOPLE, never the number of meetings reported as people — so both
+    # sides of the case are built from the rows.
     ("interviewed count", "How many candidates have we interviewed?",
-     GIVES_UP, ("hiring_pipeline", "interview_schedule"),
-     # meetings and people are different counts; the answer must show it
-     ["record", "records", "meeting", "separate"]),
+     lambda db, cid: GIVES_UP + _meetings_as_people(db, cid),
+     ("hiring_pipeline", "interview_schedule"),
+     lambda db, cid: _people_interviewed(db, cid)),
     ("hiring now", "Are we hiring anyone right now?",
      GIVES_UP + ["we are not hiring", "not hiring anyone"],
      "hiring_pipeline"),
@@ -197,11 +218,10 @@ CASES = [
     # "Attendance issues" is not a field — the measure must be named
     ("dept issues", "Which department had the most attendance issues?",
      GIVES_UP, "attendance_period", ["absent days", "absence rate"]),
-    # A booking is not a day taken
+    # A booking is not a day taken — and what the answer must say
+    # depends on whether anybody currently HAS a booking.
     ("most leave year", "Which employee took the most leave this year?",
-     GIVES_UP + ["2 days taken", "took 2 days", "total of 2 days"],
-     "leave_usage", ["booked", "still to come", "upcoming", "1 day",
-                     "one day"]),
+     GIVES_UP, "leave_usage", lambda db, cid: _leave_expectation(db, cid)),
     # The list is every upcoming leave, not this week's
     ("upcoming leaves", "Are there any upcoming leaves?",
      GIVES_UP + ["this week"], None, None),
@@ -297,6 +317,83 @@ def pick_company(db):
     return max(ceos, key=slips)
 
 
+def _hiring(db, company_id):
+    from app.utils.hr_company_data import run_company_tools
+    try:
+        return (run_company_tools(db, company_id, ["hiring_pipeline"])
+                .get("hiring_pipeline") or {})
+    except Exception:                                           # noqa: BLE001
+        return {}
+
+
+def _people_interviewed(db, company_id):
+    """The candidate count the answer must state — not the meeting count."""
+    d = _hiring(db, company_id)
+    n = d.get("candidates_interviewed")
+    if n is None:
+        return ["interview"]          # nothing to compare; keep it loose
+    if n == 0:
+        return ["no candidate", "nobody", "none", "0 candidate"]
+    return [f"{n} candidate", f"interviewed {n}", f"{n} people",
+            f"{n} person" if n == 1 else f"{n} unique"]
+
+
+def _meetings_as_people(db, company_id):
+    """
+    Phrases that would mean the meeting count was reported as people.
+
+    One candidate interviewed for two roles is two records and one
+    person. Saying "we interviewed 5 candidates" when 5 is the number of
+    interview records is the specific failure — and it is only wrong
+    because of what the rows say, so it is built from them.
+    """
+    d = _hiring(db, company_id)
+    records = d.get("interview_records")
+    people = d.get("candidates_interviewed")
+    if records is None or people is None or records == people:
+        return []                     # no distinction to get wrong today
+    return [f"{records} candidates", f"interviewed {records}",
+            f"{records} people"]
+
+
+def _leave_expectation(db, company_id):
+    """
+    What the answer to "who took the most leave?" must contain, today.
+
+    The distinction being protected is real: `days_debited_from_balance`
+    counts an approved future booking, `days_already_taken` does not, and
+    the console once reported the first as the second. But which of them
+    the answer has to SPELL OUT depends on the data:
+
+        somebody has days booked ahead  ->  the answer must separate them
+        nobody does                     ->  it must state the days taken
+
+    Returning None would skip the check; it never returns None, so the
+    case cannot quietly stop testing anything.
+    """
+    from app.utils.hr_company_data import run_company_tools
+
+    try:
+        data = run_company_tools(db, company_id, ["leave_usage"])
+        rows = (data.get("leave_usage") or {}).get("by_employee") or []
+    except Exception:                                           # noqa: BLE001
+        rows = []
+
+    if not rows:
+        return ["no leave", "nobody", "no approved leave", "0 days"]
+
+    if any((r.get("days_booked_ahead") or 0) > 0 for r in rows):
+        # A booking exists, so conflating it with a day taken is exactly
+        # the failure. The answer has to name the difference.
+        return ["booked", "still to come", "upcoming", "not yet taken"]
+
+    # Nothing is booked ahead, so the answer just has to be the right
+    # number of days actually taken.
+    top = max(rows, key=lambda r: r.get("days_already_taken") or 0)
+    n = top.get("days_already_taken") or 0
+    return [f"{n} day", f"{n} days"] if n else ["no leave", "0 day", "none"]
+
+
 def main() -> int:
     db = SessionLocal()
     ceo = pick_company(db)
@@ -324,6 +421,20 @@ def main() -> int:
         # A clarification is a source without a tool name
         used = [s.get("name") for s in out["sources"] if s.get("name")]
 
+        # ⚠ `problems` IS STARTED HERE, NOT LATER.
+        # It used to be created by the `banned` comprehension BELOW the
+        # source-shape loop — so that loop's `problems.append` had no
+        # list to append to on the first case, and on later cases the
+        # comprehension REASSIGNED the name and threw away whatever it
+        # had found.
+        #
+        # The source-shape check was added to stop the blank-screen crash
+        # coming back, and it has been dead since the day it was written:
+        # never reporting, and set up to raise NameError if it ever did.
+        # A guard that reads as working and does nothing is the thing
+        # this suite exists to catch.
+        problems = []
+
         # ──── The shape the UI has to render ────
         # Every source is a dict, and one without a `name` must still say
         # what it IS. `s.name.replace()` on a nameless source unmounted
@@ -333,7 +444,12 @@ def main() -> int:
             if not isinstance(s, dict) or not (s.get("name") or s.get("kind")):
                 problems.append(f"source with neither name nor kind: {s!r}")
 
-        problems = [b for b in banned if b in low]
+        # `banned` may be built from the data too, for the same reason
+        # `must_say` may: the wrong answer is often a REAL figure used
+        # for the wrong thing, and which figure that is depends on the
+        # rows.
+        blocked = banned(db, ceo.company_id) if callable(banned) else banned
+        problems += [b for b in blocked if b in low]
         problems += [g for g in GENDERED if g in low]
         if _FILLER.search(reply):
             problems.append("ends on filler")
@@ -343,8 +459,19 @@ def main() -> int:
             allowed = (must_use,) if isinstance(must_use, str) else must_use
             if not any(t in used for t in allowed):
                 problems.append(f"used {used}, needed one of {list(allowed)}")
-        if must_say and not any(w.lower() in low for w in must_say):
-            problems.append(f"says none of {list(must_say)}")
+        # ⚠ `must_say` MAY BE A FUNCTION OF THE DATA.
+        # A fixed list asserts a particular state of the database, and
+        # this one aged out: the leave case demanded the words "booked"
+        # or "still to come", which were right when written because
+        # Sheikh Wasi had a day approved for 4-5 September. On the 4th
+        # that day was taken, `days_booked_ahead` became 0, the console
+        # answered correctly — and the check failed.
+        #
+        # Same lesson as `check_integrations`: assert that the answer
+        # AGREES WITH THE DATA, not that the data is in a given state.
+        wanted = must_say(db, ceo.company_id) if callable(must_say) else must_say
+        if wanted and not any(w.lower() in low for w in wanted):
+            problems.append(f"says none of {list(wanted)}")
 
         # A payslip claimed but not sent
         if any(p in low for p in FAKE_ATTACH) and not out.get("attachments"):

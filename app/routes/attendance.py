@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from app.database import get_db
+from app.utils.tenancy import Tenant, get_tenant, require_ceo
 from app.utils.security import get_current_user
 from app.models.attendance import (
     FaceEnrollment, AttendanceSession, AttendanceInterval,
@@ -710,7 +711,7 @@ def enroll_face(
 def check_in(
     data: CheckInSchema,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: Tenant = Depends(get_tenant)
 ):
     _assert_self(current_user, data.employee_id)
 
@@ -834,7 +835,7 @@ def check_in(
 def pause_session(
     data: PauseSchema,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: Tenant = Depends(get_tenant)
 ):
     _assert_self(current_user, data.employee_id)
 
@@ -879,7 +880,7 @@ def pause_session(
 def resume_session(
     data: ResumeSchema,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: Tenant = Depends(get_tenant)
 ):
     _assert_self(current_user, data.employee_id)
 
@@ -927,7 +928,7 @@ def resume_session(
 def check_out(
     data: CheckOutSchema,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: Tenant = Depends(get_tenant)
 ):
     _assert_self(current_user, data.employee_id)
 
@@ -1099,7 +1100,7 @@ def get_daily_report(
     employee_id: int,
     report_date: str,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: Tenant = Depends(get_tenant)
 ):
     employee = _assert_can_view(db, current_user, employee_id)
 
@@ -1143,7 +1144,7 @@ def get_attendance_history(
     to_date: Optional[str] = None,
     limit: int = Query(90, ge=1, le=366),
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: Tenant = Depends(get_tenant)
 ):
     employee = _assert_can_view(db, current_user, employee_id)
 
@@ -1179,7 +1180,7 @@ def get_attendance_history(
 def get_today_status(
     employee_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: Tenant = Depends(get_tenant)
 ):
     employee = _assert_can_view(db, current_user, employee_id)
     now = get_pkt_now()
@@ -1260,7 +1261,7 @@ def get_today_status(
 def check_enrollment_status(
     employee_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: Tenant = Depends(get_tenant)
 ):
     _assert_can_view(db, current_user, employee_id)
 
@@ -1283,7 +1284,7 @@ def check_enrollment_status(
 def self_enroll_face(
     data: EnrollFaceSchema,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: Tenant = Depends(get_tenant)
 ):
     # ──── You may only enrol your own face ────
     employee_id = current_user["user_id"]
@@ -1343,7 +1344,7 @@ def get_team_attendance(
     so the 'Absent' count always stayed at 0.
     """
     ceo = _get_user_or_404(db, current_user["user_id"])
-    company_id = ceo.id
+    company_id = current_user["company_id"]
     now_pkt = get_pkt_now()
 
     # Today's SHIFT day — this tells us whether the requested day has
@@ -1506,7 +1507,7 @@ def get_monthly_summary(
     year: int,
     month: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: Tenant = Depends(get_tenant)
 ):
     _assert_can_view(db, current_user, employee_id)
 
@@ -1570,7 +1571,7 @@ def get_attendance_overview(
     monthly = every day of the current month (up to today)
     """
     ceo = _get_user_or_404(db, current_user["user_id"])
-    company_id = ceo.id
+    company_id = current_user["company_id"]
     today = _work_date(db, company_id)
 
     if range_ == "weekly":
@@ -1662,7 +1663,7 @@ def get_attendance_photo(
     session_id: int,
     kind: str,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: Tenant = Depends(get_tenant)
 ):
     """Photos are served from the DB. Files from older records still work."""
     if kind not in ("checkin", "checkout"):
@@ -1709,7 +1710,7 @@ def get_attendance_photo(
 def get_enrollment_photo(
     employee_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: Tenant = Depends(get_tenant)
 ):
     """The employee's enrolment reference photo — so the CEO can compare"""
     _assert_can_view(db, current_user, employee_id)
@@ -1735,7 +1736,7 @@ def get_enrollment_photo(
 @router.get("/my-office")
 def get_my_office(
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: Tenant = Depends(get_tenant)
 ):
     """So the employee knows where the office is and what the radius is"""
     user = _get_user_or_404(db, current_user["user_id"])

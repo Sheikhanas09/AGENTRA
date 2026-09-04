@@ -2,9 +2,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.models.company import Company, LIVE_STATUSES
 from app.schemas.user import CEOSignup, LoginSchema
 from app.crud.user import create_ceo, get_user_by_email
-from app.utils.security import verify_password, create_access_token  
+from app.utils.security import verify_password, create_access_token
+from app.utils.tenancy import auth_scope
 
 router = APIRouter(
     prefix="/auth",
@@ -12,13 +14,28 @@ router = APIRouter(
 )
 
 
-# CEO Signup
+# ══════════════════════════════════════════════
+# Signing up IS creating a company
+# ══════════════════════════════════════════════
 @router.post("/ceo-signup")
-def ceo_signup(data: CEOSignup, db: Session = Depends(get_db)):
+def ceo_signup(
+    data: CEOSignup,
+    db: Session = Depends(get_db),
+    _: None = Depends(auth_scope),
+):
+    """
+    A new tenant.
 
-    user = get_user_by_email(db, data.email)
+    Two rows are written together and neither is any use alone: the
+    company, and the CEO who owns it. `crud.create_ceo` does both in one
+    transaction — a CEO with no company cannot sign in, and a company
+    with no CEO can never be reached.
 
-    if user:
+    Both start `pending`. The superadmin approving the CEO is what makes
+    the company live, which is the flow that already existed; this only
+    gives it something real to switch on.
+    """
+    if get_user_by_email(db, data.email):
         raise HTTPException(
             status_code=400,
             detail="Email already registered"
@@ -30,17 +47,22 @@ def ceo_signup(data: CEOSignup, db: Session = Depends(get_db)):
             detail="Passwords do not match"
         )
 
-    new_user = create_ceo(db, data)
+    new_user, company = create_ceo(db, data)
 
     return {
         "message": "Signup request sent to admin",
-        "user_id": new_user.id
+        "user_id": new_user.id,
+        "company_id": company.id,
+        "company_name": company.name,
     }
 
 
 @router.post("/login")
-def login(data: LoginSchema, db: Session = Depends(get_db)):
-
+def login(
+    data: LoginSchema,
+    db: Session = Depends(get_db),
+    _: None = Depends(auth_scope),
+):
     user = get_user_by_email(db, data.email)
 
     if not user:
@@ -59,10 +81,52 @@ def login(data: LoginSchema, db: Session = Depends(get_db)):
             detail="Your account has been deactivate"
         )
 
+    # ══════════════════════════════════════════════
+    # The company has to be live — for everybody in it
+    # ══════════════════════════════════════════════
+    # Suspension used to be a CEO-account status, so switching a company
+    # off locked the CEO out and left every employee working normally:
+    # marking attendance, applying for leave, drawing payroll. That is
+    # not a suspended tenant, it is a tenant with no owner.
+    company = None
+    if user.role != "superadmin":
+        if not user.company_id:
+            raise HTTPException(
+                status_code=403,
+                detail="This account is not linked to a company. Please "
+                       "contact your administrator.",
+            )
+        company = db.query(Company).filter(
+            Company.id == user.company_id).first()
+        if not company:
+            raise HTTPException(
+                status_code=403,
+                detail="This account is not linked to a company. Please "
+                       "contact your administrator.",
+            )
+        if company.status not in LIVE_STATUSES:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"{company.name} is not active"
+                    + (f" — {company.suspended_reason}"
+                       if company.suspended_reason else "")
+                    + ". Please contact your administrator."
+                ),
+            )
+
+    # ══════════════════════════════════════════════
+    # The token says which company, but nothing trusts it
+    # ══════════════════════════════════════════════
+    # Carrying it makes the common path cheap and makes a mismatch
+    # detectable. `get_tenant` re-reads the user on every request and
+    # compares — so a token minted before somebody moved, or one edited
+    # by hand, is refused instead of being used to reach the old company.
     token = create_access_token({
         "user_id": user.id,
         "role": user.role,
-        "email": user.email
+        "email": user.email,
+        "company_id": user.company_id,
     })
 
     return {
@@ -72,5 +136,8 @@ def login(data: LoginSchema, db: Session = Depends(get_db)):
         "full_name": user.full_name,
         "user_id": user.id,
         "department": user.department,
-        "company_name": user.company_name 
+        "company_id": user.company_id,
+        # The company's own name, not the copy on the user row — after a
+        # rename those differ, and this one is right.
+        "company_name": company.name if company else user.company_name,
     }

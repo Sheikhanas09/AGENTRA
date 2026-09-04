@@ -28,23 +28,30 @@ so they are told plainly when something was approved on their behalf.
 """
 
 import os
-import smtplib
-import threading
 from concurrent.futures import ThreadPoolExecutor
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from typing import Optional, List
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
-SMTP_HOST = "smtp.gmail.com"
-SMTP_PORT = 587
-SMTP_TIMEOUT = 20
-
-SENDER_EMAIL = os.getenv("NOTIFY_SENDER_EMAIL") or "nirmal.naik1994@gmail.com"
-SENDER_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
+# ══════════════════════════════════════════════
+# THE SENDER IS THE COMPANY
+# ══════════════════════════════════════════════
+# This module used to hold:
+#
+#     SENDER_EMAIL = os.getenv("NOTIFY_SENDER_EMAIL") or "someone@gmail.com"
+#     SENDER_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
+#
+# — one address and one app password for every company in the system. An
+# employee of one company received their leave decision, and their
+# payslip, from a different company's Gmail account.
+#
+# Every function below now takes `company_id` and sends through that
+# company's own connected Google account (`utils/mailer.py`). There is no
+# shared fallback, deliberately: a fallback is the thing being removed,
+# and it would quietly reinstate itself the first time somebody forgot
+# to connect.
 
 # To switch these off while testing, set NOTIFICATIONS_ENABLED=false in .env
 ENABLED = os.getenv("NOTIFICATIONS_ENABLED", "true").strip().lower() not in (
@@ -64,39 +71,43 @@ def _warn_once(message: str):
         _warned = True
 
 
-def _deliver(to: List[str], subject: str, body: str):
-    """The actual SMTP work — runs on a background thread"""
+def _deliver(company_id: int, to: List[str], subject: str, body: str):
+    """
+    The actual send — runs on a background thread.
+
+    ⚠ IT OPENS ITS OWN SESSION. The request's session is long gone by the
+    time this runs, and the credential load may refresh the token and
+    write it back. `open_tenant_session` also means every query in here
+    is confined to this company, on a thread nobody is watching.
+    """
+    from app.utils.mailer import send_as_company
+    from app.utils.tenancy import open_tenant_session
+
     try:
-        msg = MIMEMultipart()
-        msg["From"] = SENDER_EMAIL
-        msg["To"] = ", ".join(to)
-        msg["Subject"] = subject
-        msg.attach(MIMEText(body, "plain", "utf-8"))
-
-        server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT)
-        server.starttls()
-        server.login(SENDER_EMAIL, SENDER_PASSWORD)
-        server.sendmail(SENDER_EMAIL, to, msg.as_string())
-        server.quit()
-
-        print(f"[notify] sent -> {', '.join(to)} | {subject}")
-
-    except Exception as e:
+        with open_tenant_session(company_id) as db:
+            ok, detail = send_as_company(
+                db, company_id, to=", ".join(to), subject=subject,
+                text_body=body)
+        if ok:
+            print(f"[notify] sent -> {', '.join(to)} | {subject}")
+        else:
+            print(f"[notify] NOT SENT -> {', '.join(to)} | {subject} | {detail}")
+    except Exception as e:                                      # noqa: BLE001
         # ──── Not silently — log it, but never stop the work ────
         print(f"[notify] FAILED -> {', '.join(to)} | {subject} | {e}")
 
 
-def send_email(to, subject: str, body: str) -> bool:
+def send_email(company_id: int, to, subject: str, body: str) -> bool:
     """
-    Send an email in the background. Returns immediately.
+    Send an email in the background, as `company_id`. Returns immediately.
 
     Return: True = queued (it will be sent), False = cannot be sent at all
     """
     if not ENABLED:
         return False
 
-    if not SENDER_PASSWORD:
-        _warn_once("GMAIL_APP_PASSWORD is not set — emails are disabled")
+    if not company_id:
+        _warn_once("send_email was called without a company — not sending")
         return False
 
     recipients = [to] if isinstance(to, str) else list(to or [])
@@ -105,7 +116,7 @@ def send_email(to, subject: str, body: str) -> bool:
         return False
 
     try:
-        _pool.submit(_deliver, recipients, subject, body)
+        _pool.submit(_deliver, company_id, recipients, subject, body)
         return True
     except Exception as e:
         print(f"[notify] queue failed: {e}")
@@ -127,6 +138,7 @@ def _dates(start, end) -> str:
 
 
 def leave_submitted_to_ceo(
+    company_id: int,
     ceo_email: str, ceo_name: str, employee_name: str, leave_type: str,
     start, end, days: int, reason: str, auto_approve_at: Optional[str],
     agent_note: str = "", company: str = "",
@@ -154,6 +166,7 @@ Reason    : {reason}
 Open the Agentra dashboard to decide."""
 
     return send_email(
+        company_id,
         ceo_email,
         f"Leave request — {employee_name} ({_dates(start, end)})",
         body + _footer(company),
@@ -161,6 +174,7 @@ Open the Agentra dashboard to decide."""
 
 
 def leave_decision_to_employee(
+    company_id: int,
     employee_email: str, employee_name: str, decision: str, leave_type: str,
     start, end, days: int, note: str = "", remaining: Optional[int] = None,
     auto: bool = False, company: str = "",
@@ -199,10 +213,12 @@ Days      : {days} working days{balance}
 
 You can see the full details on your Agentra dashboard."""
 
-    return send_email(employee_email, subject, body + _footer(company))
+    return send_email(company_id, employee_email, subject,
+                      body + _footer(company))
 
 
 def leave_auto_approved_to_ceo(
+    company_id: int,
     ceo_email: str, ceo_name: str, employee_name: str, leave_type: str,
     start, end, days: int, hours: int, company: str = "",
 ) -> bool:
@@ -221,6 +237,7 @@ Days   : {days} working days
 If this is not right, you can still use "Cancel Leave" on the dashboard."""
 
     return send_email(
+        company_id,
         ceo_email,
         f"Leave auto-approved — {employee_name} ({_dates(start, end)})",
         body + _footer(company),
@@ -228,6 +245,7 @@ If this is not right, you can still use "Cancel Leave" on the dashboard."""
 
 
 def leave_cancelled_to_ceo(
+    company_id: int,
     ceo_email: str, ceo_name: str, employee_name: str, leave_type: str,
     start, end, by_ceo: bool = False, company: str = "",
 ) -> bool:
@@ -247,6 +265,7 @@ Dates  : {_dates(start, end)}
 The balance has been returned to their account."""
 
     return send_email(
+        company_id,
         ceo_email,
         f"Leave cancelled — {employee_name} ({_dates(start, end)})",
         body + _footer(company),
@@ -254,6 +273,7 @@ The balance has been returned to their account."""
 
 
 def leave_reminder_to_ceo(
+    company_id: int,
     ceo_email: str, ceo_name: str, pending: List[dict], hours_left: int,
     company: str = "",
 ) -> bool:
@@ -280,6 +300,7 @@ approved automatically.
 Open the Agentra dashboard."""
 
     return send_email(
+        company_id,
         ceo_email,
         f"{len(pending)} leave request(s) awaiting your response",
         body + _footer(company),

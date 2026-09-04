@@ -126,7 +126,7 @@ def ask(
         raise HTTPException(
             400, f"That question is too long (limit {MAX_QUESTION_CHARS})")
 
-    session = _console_session(db, ceo.id, data.session_id)
+    session = _console_session(db, ceo.company_id, data.session_id)
 
     # `sources` travels with the reply, not just the text: a follow-up
     # like "how many of them are from Backend" is answered by reusing the
@@ -146,7 +146,7 @@ def ask(
     try:
         from app.agents.hr_console_agent import ask_console
 
-        out = ask_console(db=db, company_id=ceo.id,
+        out = ask_console(db=db, company_id=current_user["company_id"],
                           ceo_name=ceo.full_name or "", message=text,
                           history=history)
     except Exception as e:                              # noqa: BLE001
@@ -182,12 +182,12 @@ def overview(
     """
     ceo = get_user_or_404(db, current_user["user_id"])
 
-    data = run_company_tools(db, ceo.id, [
+    data = run_company_tools(db, ceo.company_id, [
         "headcount", "new_joiners", "attendance_outliers",
         "leave_overview", "payroll_overview", "open_items", "case_patterns",
     ])
 
-    stale = stale_cases(db, ceo.id)
+    stale = stale_cases(db, ceo.company_id)
     db.commit()          # get_settings may have created the settings row
 
     now = datetime.utcnow()
@@ -217,7 +217,7 @@ def read_settings(
     current_user: dict = Depends(require_ceo),
 ):
     ceo = get_user_or_404(db, current_user["user_id"])
-    s = get_settings(db, ceo.id)
+    s = get_settings(db, ceo.company_id)
     db.commit()
 
     return {
@@ -245,7 +245,7 @@ def update_settings(
     them.
     """
     ceo = get_user_or_404(db, current_user["user_id"])
-    s = get_settings(db, ceo.id)
+    s = get_settings(db, ceo.company_id)
 
     changed = {}
     for field, (lo, hi) in SETTING_LIMITS.items():
@@ -311,7 +311,7 @@ def list_former(
 ):
     """Everyone who used to work here, and what their file says."""
     ceo = get_user_or_404(db, current_user["user_id"])
-    data = run_company_tools(db, ceo.id, ["former_employees"])
+    data = run_company_tools(db, ceo.company_id, ["former_employees"])
     db.commit()
     return data.get("former_employees") or {"count": 0, "former_employees": []}
 
@@ -368,7 +368,7 @@ def end_employment(
 
     record = EmploymentRecord(
         employee_id=employee.id,
-        company_id=ceo.id,
+        company_id=current_user["company_id"],
         # Copied now, not looked up later — a leaver's record should read
         # the way it did on the day they left, even if a department is
         # renamed afterwards.
@@ -412,7 +412,7 @@ def mark_settled(
     ceo = get_user_or_404(db, current_user["user_id"])
     rec = db.query(EmploymentRecord).filter(
         EmploymentRecord.id == record_id,
-        EmploymentRecord.company_id == ceo.id,
+        EmploymentRecord.company_id == ceo.company_id,
     ).first()
     if not rec:
         raise HTTPException(404, "Record not found")

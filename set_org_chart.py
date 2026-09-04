@@ -46,7 +46,17 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from app.database import SessionLocal
+# ──── This script works across companies, and says so ────
+# The tenant guard refuses any query on a session that has not declared
+# which company it is for. These tools audit or repair the whole
+# database, so crossing companies IS the job — the point is that it is
+# declared rather than assumed, and appears in the list
+# `check_tenancy.py` prints.
+from app.utils.tenancy import unscoped_session
+
+
+def SessionLocal():          # noqa: N802  (same name, declared scope)
+    return unscoped_session("set_org_chart: applies the CEO's department mapping")
 from app.models.user import User
 
 APPLY = "--apply" in sys.argv

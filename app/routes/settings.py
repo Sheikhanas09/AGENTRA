@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from typing import List, Optional
 from app.database import get_db
 from app.utils.security import get_current_user
+from app.utils.tenancy import Tenant, get_tenant, require_ceo, bind_tenant
 from app.models.attendance import (
     CompanyWorkPolicy, CompanyPolicy, PolicyDecisionLog,
     CompanyPolicyOverride, LeaveBalance, OfficeLocation
@@ -19,10 +20,11 @@ from app.models.user import User
 router = APIRouter(prefix="/settings", tags=["Settings"])
 
 
-def require_ceo(current_user: dict = Depends(get_current_user)):
-    if current_user["role"] not in ["ceo", "superadmin"]:
-        raise HTTPException(status_code=403, detail="Only the CEO can do this")
-    return current_user
+# ──── `require_ceo` is imported, not defined here ────
+# This file had its own, and so did `routes/ceo.py`, `routes/recruitment.py`
+# and `utils/company.py`. All four asked only "is this user a CEO?" — none
+# asked "of THIS company?". The shared one in `utils/tenancy.py` answers
+# both and scopes the session while it is at it.
 
 
 # ──── Pydantic Schemas ────
@@ -102,7 +104,7 @@ def save_work_policy(
     current_user: dict = Depends(require_ceo)
 ):
     ceo = db.query(User).filter(User.id == current_user["user_id"]).first()
-    company_id = ceo.id
+    company_id = current_user["company_id"]
 
     existing = db.query(CompanyWorkPolicy).filter(
         CompanyWorkPolicy.company_id == company_id
@@ -159,7 +161,7 @@ def get_work_policy(
     current_user: dict = Depends(require_ceo)
 ):
     ceo = db.query(User).filter(User.id == current_user["user_id"]).first()
-    company_id = ceo.id
+    company_id = current_user["company_id"]
 
     policy = db.query(CompanyWorkPolicy).filter(
         CompanyWorkPolicy.company_id == company_id
@@ -209,7 +211,7 @@ def extract_work_policy_suggestion(
     ceo = db.query(User).filter(User.id == current_user["user_id"]).first()
 
     active_policy = db.query(CompanyPolicy).filter(
-        CompanyPolicy.company_id == ceo.id,
+        CompanyPolicy.company_id == current_user["company_id"],
         CompanyPolicy.is_active == True
     ).first()
 
@@ -221,7 +223,7 @@ def extract_work_policy_suggestion(
 
     try:
         from app.agents.work_policy_extraction_agent import extract_work_policy
-        result = extract_work_policy(ceo.id)
+        result = extract_work_policy(current_user["company_id"])
     except Exception as e:
         print(f"Work policy extraction failed: {e}")
         raise HTTPException(
@@ -232,7 +234,7 @@ def extract_work_policy_suggestion(
     # ──── Match each suggestion against the current value ────
     # The CEO should see what is CHANGING, not just the new value
     current = db.query(CompanyWorkPolicy).filter(
-        CompanyWorkPolicy.company_id == ceo.id
+        CompanyWorkPolicy.company_id == current_user["company_id"]
     ).first()
 
     for name, item in result["fields"].items():
@@ -265,7 +267,7 @@ def save_office_location(
     Modular — it can be changed from Settings.
     """
     ceo = db.query(User).filter(User.id == current_user["user_id"]).first()
-    company_id = ceo.id
+    company_id = current_user["company_id"]
 
     existing = db.query(OfficeLocation).filter(
         OfficeLocation.company_id == company_id
@@ -312,25 +314,28 @@ def save_office_location(
 @router.get("/office-location")
 def get_office_location(
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    tenant: Tenant = Depends(get_tenant),
 ):
-    """Office location lo"""
-    from app.models.user import User
+    """
+    The office, for whoever is asking.
 
-    user = db.query(User).filter(User.id == current_user["user_id"]).first()
+    ═══ THIS WAS THE STRING MATCH, IN FULL ═══
+        if user.role == "ceo":
+            company_id = user.id                    # a user id as a company
+        else:
+            ceo = db.query(User).filter(
+                User.company_name == user.company_name,   # text
+                User.role == "ceo",
+            ).first()                                     # ...and the first
+            company_id = ceo.id if ceo else None
 
-    # ──── CEO dhundo ────
-    if user.role == "ceo":
-        company_id = user.id
-    else:
-        ceo = db.query(User).filter(
-            User.company_name == user.company_name,
-            User.role == "ceo"
-        ).first()
-        company_id = ceo.id if ceo else None
+    An employee of a company sharing its name with another would have
+    been handed the OTHER company's office coordinates, and then marked
+    out of range every day at their own desk.
 
-    if not company_id:
-        return {"office": None}
+    One dependency now, and the same answer everywhere.
+    """
+    company_id = tenant.company_id
 
     office = db.query(OfficeLocation).filter(
         OfficeLocation.company_id == company_id,
@@ -357,13 +362,25 @@ def get_office_location(
 def verify_location(
     employee_lat: float,
     employee_lng: float,
-    company_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
 ):
     """
-    Verify the employee's GPS location —
-    whether it is inside the office radius.
+    Whether the employee's GPS reading is inside their office radius.
+
+    ═══ THE COMPANY USED TO BE AN ARGUMENT ═══
+        def verify_location(employee_lat, employee_lng,
+                            company_id: int, ...)
+
+    It was a query parameter with no authentication on the route at all,
+    so the caller chose which company to be measured against. Anyone
+    could sweep company ids and read back every office's name, radius and
+    — from the distances — roughly where each one is.
+
+    The caller no longer says which company. It is the one they are in.
     """
+    company_id = tenant.company_id
+
     office = db.query(OfficeLocation).filter(
         OfficeLocation.company_id == company_id,
         OfficeLocation.is_active == True
@@ -609,6 +626,20 @@ def process_policy_document(
     SessionLocal = sessionmaker(bind=engine)
     session = SessionLocal()
 
+    # ══════════════════════════════════════════════
+    # A background task has no request to inherit from
+    # ══════════════════════════════════════════════
+    # This runs after the upload response has been sent, on a session it
+    # builds itself. Nothing has told that session which company it is
+    # working for, so the tenant guard would refuse every query in here —
+    # which is the guard doing its job: this function indexes a document
+    # and then writes leave types, shift timings and payroll rules, and
+    # it must not be able to write them into the wrong company.
+    #
+    # `company_id` is a parameter this task already received from the
+    # route that scheduled it, so the scope is stamped from that.
+    bind_tenant(session, company_id)
+
     try:
         text = extract_policy_text(file_path, file_type)
         if not text:
@@ -721,7 +752,7 @@ async def upload_policy(
     current_user: dict = Depends(require_ceo)
 ):
     ceo = db.query(User).filter(User.id == current_user["user_id"]).first()
-    company_id = ceo.id
+    company_id = current_user["company_id"]
 
     filename = file.filename.lower()
     if filename.endswith(".pdf"):
@@ -825,7 +856,7 @@ def get_active_policy(
     current_user: dict = Depends(require_ceo)
 ):
     ceo = db.query(User).filter(User.id == current_user["user_id"]).first()
-    company_id = ceo.id
+    company_id = current_user["company_id"]
 
     policy = db.query(CompanyPolicy).filter(
         CompanyPolicy.company_id == company_id,
@@ -875,7 +906,7 @@ def list_policies(
     ceo = db.query(User).filter(User.id == current_user["user_id"]).first()
 
     policies = db.query(CompanyPolicy).filter(
-        CompanyPolicy.company_id == ceo.id
+        CompanyPolicy.company_id == current_user["company_id"]
     ).order_by(CompanyPolicy.created_at.desc()).all()
 
     return {
@@ -929,7 +960,7 @@ def activate_policy(
     Old policies are NOT deleted — the CEO can move between them freely.
     """
     ceo = db.query(User).filter(User.id == current_user["user_id"]).first()
-    company_id = ceo.id
+    company_id = current_user["company_id"]
 
     policy = db.query(CompanyPolicy).filter(
         CompanyPolicy.id == policy_id,
@@ -1003,7 +1034,7 @@ def delete_policy(
 
     policy = db.query(CompanyPolicy).filter(
         CompanyPolicy.id == policy_id,
-        CompanyPolicy.company_id == ceo.id
+        CompanyPolicy.company_id == current_user["company_id"]
     ).first()
 
     if not policy:
@@ -1028,7 +1059,8 @@ def delete_policy(
             chroma_client = chromadb.PersistentClient(
                 path=os.path.join(os.path.dirname(__file__), "..", "chroma_db")
             )
-            chroma_client.delete_collection(f"company_{ceo.id}_policies")
+            chroma_client.delete_collection(
+                f"company_{current_user['company_id']}_policies")
             chunks_removed = True
         except Exception as e:
             # If the collection does not exist, that is fine
@@ -1068,7 +1100,7 @@ def set_override(
     current_user: dict = Depends(require_ceo)
 ):
     ceo = db.query(User).filter(User.id == current_user["user_id"]).first()
-    company_id = ceo.id
+    company_id = current_user["company_id"]
 
     existing = db.query(CompanyPolicyOverride).filter(
         CompanyPolicyOverride.company_id == company_id,

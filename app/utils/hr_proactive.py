@@ -114,19 +114,27 @@ def _tell_employee(db: Session, employee: User, company_id: int,
     try:
         from app.utils import notify
         if employee.email:
-            notify.send_email(to=employee.email, subject="A note from HR",
+            notify.send_email(company_id=company_id,
+                              to=employee.email, subject="A note from HR",
                               body=f"Dear {employee.full_name},\n\n{text}\n")
     except Exception as e:                              # noqa: BLE001
         print(f"[proactive] could not email {employee.id}: {e}")
 
 
 def _tell_ceo(db: Session, company_id: int, subject: str, body: str) -> None:
-    ceo = db.query(User).filter(User.id == company_id).first()
+    # ═══ A COMPANY ID IS NOT A USER ID ═══
+    # This read `User.id == company_id`, which held only while a company
+    # WAS its CEO's user row. For any company registered since, it
+    # returns None — so the CEO is simply never told, and nothing
+    # anywhere says why.
+    ceo = db.query(User).filter(
+        User.company_id == company_id, User.role == "ceo").first()
     if not ceo or not ceo.email:
         return
     try:
         from app.utils import notify
-        notify.send_email(to=ceo.email, subject=subject,
+        notify.send_email(company_id=company_id,
+                          to=ceo.email, subject=subject,
                           body=f"Dear {ceo.full_name},\n\n{body}\n")
     except Exception as e:                              # noqa: BLE001
         print(f"[proactive] could not email the CEO: {e}")
@@ -150,7 +158,7 @@ def _staff(db: Session, ceo: User) -> list:
 # 1. Probation is ending
 # ══════════════════════════════════════════════
 def check_probation(db: Session, ceo: User) -> int:
-    s = get_settings(db, ceo.id)
+    s = get_settings(db, ceo.company_id)
     length, notice = s.probation_days or 0, s.probation_notice_days or 0
     if not (length and notice):
         return 0
@@ -168,23 +176,23 @@ def check_probation(db: Session, ceo: User) -> int:
 
         ref = str(ends)
         if s.proactive_to_employee and not _already_sent(
-                db, ceo.id, "probation_employee", ref, u.id):
-            _tell_employee(db, u, ceo.id,
+                db, ceo.company_id, "probation_employee", ref, u.id):
+            _tell_employee(db, u, ceo.company_id,
                            f"Your probation period ends on {ends}. "
                            f"Nothing is needed from you — I will confirm "
                            f"once it has been reviewed.")
-            _mark_sent(db, ceo.id, "probation_employee", ref, u.id)
+            _mark_sent(db, ceo.company_id, "probation_employee", ref, u.id)
             sent += 1
 
         if s.proactive_to_ceo and not _already_sent(
-                db, ceo.id, "probation_ceo", ref, u.id):
-            _tell_ceo(db, ceo.id,
+                db, ceo.company_id, "probation_ceo", ref, u.id):
+            _tell_ceo(db, ceo.company_id,
                       f"Probation ending — {u.full_name}",
                       f"{u.full_name} ({u.department or 'no department'}) "
                       f"joined on {u.joining_date} and their {length}-day "
                       f"probation ends on {ends}.\n\n"
                       f"This needs a decision to confirm or extend.")
-            _mark_sent(db, ceo.id, "probation_ceo", ref, u.id)
+            _mark_sent(db, ceo.company_id, "probation_ceo", ref, u.id)
             sent += 1
 
     return sent
@@ -194,7 +202,7 @@ def check_probation(db: Session, ceo: User) -> int:
 # 2. Leave days about to lapse
 # ══════════════════════════════════════════════
 def check_leave_expiry(db: Session, ceo: User) -> int:
-    s = get_settings(db, ceo.id)
+    s = get_settings(db, ceo.company_id)
     notice = s.leave_expiry_notice_days or 0
     if not (notice and s.proactive_to_employee):
         return 0
@@ -210,7 +218,7 @@ def check_leave_expiry(db: Session, ceo: User) -> int:
     # lapse. Only types with a real entitlement can expire.
     limited = {
         t.code for t in db.query(CompanyLeaveType).filter(
-            CompanyLeaveType.company_id == ceo.id,
+            CompanyLeaveType.company_id == ceo.company_id,
             CompanyLeaveType.is_enabled == True,        # noqa: E712
             CompanyLeaveType.is_unlimited == False,     # noqa: E712
         ).all()
@@ -230,17 +238,17 @@ def check_leave_expiry(db: Session, ceo: User) -> int:
             continue
 
         # Once per employee per year — the ref is the year itself.
-        if _already_sent(db, ceo.id, "leave_expiry", today.year, u.id):
+        if _already_sent(db, ceo.company_id, "leave_expiry", today.year, u.id):
             continue
 
-        _tell_employee(db, u, ceo.id,
+        _tell_employee(db, u, ceo.company_id,
                        f"You have {total} leave "
                        f"{'day' if total == 1 else 'days'} left for "
                        f"{today.year}, "
                        f"and the year ends on {year_end}. If you would like "
                        f"to use any of them, tell me the dates and I will "
                        f"put the request in for you.")
-        _mark_sent(db, ceo.id, "leave_expiry", today.year, u.id)
+        _mark_sent(db, ceo.company_id, "leave_expiry", today.year, u.id)
         sent += 1
 
     return sent
@@ -257,7 +265,7 @@ def check_attendance_concern(db: Session, ceo: User) -> int:
     Someone late six times usually has a reason, and the only way to hear
     it is to ask in a way that is safe to answer.
     """
-    s = get_settings(db, ceo.id)
+    s = get_settings(db, ceo.company_id)
     limit, window = s.late_pattern_count or 0, s.late_pattern_window_days or 0
     if not (limit and window and s.proactive_to_employee):
         return 0
@@ -277,10 +285,10 @@ def check_attendance_concern(db: Session, ceo: User) -> int:
             continue
 
         ref = f"{today.year}-{today.month:02d}"
-        if _already_sent(db, ceo.id, "attendance_concern", ref, u.id):
+        if _already_sent(db, ceo.company_id, "attendance_concern", ref, u.id):
             continue
 
-        _tell_employee(db, u, ceo.id,
+        _tell_employee(db, u, ceo.company_id,
                        f"I noticed you have arrived late {late} "
                        f"{'time' if late == 1 else 'times'} in the last "
                        f"{window} days. This is not a warning — I only "
@@ -288,7 +296,7 @@ def check_attendance_concern(db: Session, ceo: User) -> int:
                        f"mornings difficult. If a different shift or a "
                        f"change of hours would help, tell me and I will see "
                        f"what can be done.")
-        _mark_sent(db, ceo.id, "attendance_concern", ref, u.id)
+        _mark_sent(db, ceo.company_id, "attendance_concern", ref, u.id)
         sent += 1
 
     return sent
@@ -309,7 +317,7 @@ def check_absence_concern(db: Session, ceo: User) -> int:
     from app.models.attendance import CompanyWorkPolicy, LeaveRequest
     from app.utils.workpolicy import count_working_days
 
-    s = get_settings(db, ceo.id)
+    s = get_settings(db, ceo.company_id)
     limit = s.absence_pattern_count or 0
     window = s.absence_pattern_window_days or 0
     if not (limit and window and s.proactive_to_employee):
@@ -318,7 +326,7 @@ def check_absence_concern(db: Session, ceo: User) -> int:
     today = get_pkt_today()
     since = today - timedelta(days=window)
     policy = db.query(CompanyWorkPolicy).filter(
-        CompanyWorkPolicy.company_id == ceo.id).first()
+        CompanyWorkPolicy.company_id == ceo.company_id).first()
 
     expected = count_working_days(policy, since, today)
     if expected <= 0:
@@ -349,10 +357,10 @@ def check_absence_concern(db: Session, ceo: User) -> int:
             continue
 
         ref = f"{today.year}-{today.month:02d}"
-        if _already_sent(db, ceo.id, "absence_concern", ref, u.id):
+        if _already_sent(db, ceo.company_id, "absence_concern", ref, u.id):
             continue
 
-        _tell_employee(db, u, ceo.id,
+        _tell_employee(db, u, ceo.company_id,
                        f"I can see {missed} working "
                        f"{'day' if missed == 1 else 'days'} in the last "
                        f"{window} days with no attendance and no leave "
@@ -360,7 +368,7 @@ def check_absence_concern(db: Session, ceo: User) -> int:
                        f"before this affects your pay — if you were unwell "
                        f"or something came up, tell me and I will sort the "
                        f"records out.")
-        _mark_sent(db, ceo.id, "absence_concern", ref, u.id)
+        _mark_sent(db, ceo.company_id, "absence_concern", ref, u.id)
         sent += 1
 
     return sent
@@ -370,7 +378,7 @@ def check_absence_concern(db: Session, ceo: User) -> int:
 # 5. Things sitting on the CEO
 # ══════════════════════════════════════════════
 def check_ceo_backlog(db: Session, ceo: User) -> int:
-    s = get_settings(db, ceo.id)
+    s = get_settings(db, ceo.company_id)
     if not s.proactive_to_ceo:
         return 0
 
@@ -381,27 +389,27 @@ def check_ceo_backlog(db: Session, ceo: User) -> int:
     if sla:
         overdue = [
             r for r in db.query(HrRequest).filter(
-                HrRequest.company_id == ceo.id,
+                HrRequest.company_id == ceo.company_id,
                 HrRequest.status == "open",
             ).all()
             if r.created_at and (now - r.created_at).days >= sla
         ]
         # Once a day at most — the ref is today's date.
         ref = str(get_pkt_today())
-        if overdue and not _already_sent(db, ceo.id, "ceo_overdue", ref):
+        if overdue and not _already_sent(db, ceo.company_id, "ceo_overdue", ref):
             lines = "\n".join(
                 f"  · {r.subject} ({(now - r.created_at).days} days)"
                 for r in overdue)
-            _tell_ceo(db, ceo.id,
+            _tell_ceo(db, ceo.company_id,
                       f"{len(overdue)} request(s) waiting on you",
                       f"These have been open longer than {sla} day(s):\n\n"
                       f"{lines}\n\nOpen Requests on the dashboard to respond.")
-            _mark_sent(db, ceo.id, "ceo_overdue", ref)
+            _mark_sent(db, ceo.company_id, "ceo_overdue", ref)
             sent += 1
 
-    stale = stale_cases(db, ceo.id)
+    stale = stale_cases(db, ceo.company_id)
     ref = f"stale-{get_pkt_today()}"
-    if stale and not _already_sent(db, ceo.id, "ceo_stale_cases", ref):
+    if stale and not _already_sent(db, ceo.company_id, "ceo_stale_cases", ref):
         # Concern and age only. A stale grievance is still a grievance,
         # and the CEO knowing one exists is a different thing from the
         # CEO reading what is in it.
@@ -409,13 +417,13 @@ def check_ceo_backlog(db: Session, ceo: User) -> int:
         for c in stale:
             counts[c.concern] = counts.get(c.concern, 0) + 1
         lines = "\n".join(f"  · {k}: {v}" for k, v in counts.items())
-        _tell_ceo(db, ceo.id,
+        _tell_ceo(db, ceo.company_id,
                   f"{len(stale)} HR case(s) have gone quiet",
                   f"These have had no movement for more than "
                   f"{s.case_stale_days} day(s):\n\n{lines}\n\n"
                   f"Counts only — the details of a confidential case are "
                   f"not shared.")
-        _mark_sent(db, ceo.id, "ceo_stale_cases", ref)
+        _mark_sent(db, ceo.company_id, "ceo_stale_cases", ref)
         sent += 1
 
     return sent
@@ -441,12 +449,23 @@ def job_hr_proactive():
     must not stop the rest for that company — a broken probation date
     should not silence the leave-expiry warning.
     """
-    from app.database import SessionLocal
+    from app.utils.tenancy import (
+        live_company_ids, open_tenant_session, open_unscoped_session,
+    )
 
-    db = SessionLocal()
-    try:
-        total = 0
-        for ceo in _companies(db):
+    with open_unscoped_session("proactive: listing companies to check") as db:
+        companies = live_company_ids(db)
+
+    total = 0
+    for company_id in companies:
+        # A scoped session per company. These checks read attendance,
+        # leave and requests and then EMAIL PEOPLE about them; a query
+        # that reached across companies here would not just show the
+        # wrong number, it would send it to somebody.
+        with open_tenant_session(company_id) as db:
+            ceo = _ceo_of(db, company_id)
+            if not ceo:
+                continue
             for label, fn in CHECKS:
                 try:
                     total += fn(db, ceo)
@@ -454,7 +473,13 @@ def job_hr_proactive():
                 except Exception as e:                  # noqa: BLE001
                     db.rollback()
                     print(f"[proactive] {label} failed for company "
-                          f"{ceo.id}: {e}")
-        return f"{total} nudge(s) sent" if total else None
-    finally:
-        db.close()
+                          f"{company_id}: {e}")
+    return f"{total} nudge(s) sent" if total else None
+
+
+def _ceo_of(db, company_id: int):
+    """The CEO of one company — by `company_id`, not by a matching user id."""
+    from app.models.user import User
+    return db.query(User).filter(
+        User.company_id == company_id, User.role == "ceo"
+    ).first()

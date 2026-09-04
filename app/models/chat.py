@@ -98,6 +98,21 @@ class ChatMessage(Base):
     )
 
     id = Column(Integer, primary_key=True, index=True)
+
+    # ══════════════════════════════════════════════
+    # The tenant column
+    # ══════════════════════════════════════════════
+    # The transcript. This table reached its company only through its parent row. The
+    # routes do look the parent up first and that lookup IS scoped, so
+    # there was no known way in — but that is a fact about today's
+    # routes. A table without `company_id` is one NEITHER wall can
+    # protect: the ORM guard skips it, and no row-level-security policy
+    # can be written for it.
+    company_id = Column(
+        Integer, ForeignKey("companies.id", ondelete="RESTRICT"),
+        nullable=True, index=True,
+    )
+
     session_id = Column(Integer, ForeignKey("chat_sessions.id", ondelete="CASCADE"),
                         nullable=False)
 

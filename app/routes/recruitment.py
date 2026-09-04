@@ -8,14 +8,68 @@ from app.database import get_db
 from app.models.recruitment import Job, Candidate, Application
 from app.schemas.recruitment import JobCreate, JobResponse, CandidateCreate
 from app.utils.security import get_current_user
+from app.utils.tenancy import Tenant, get_tenant, require_ceo, public_scope
+from app.utils.google_auth import GoogleNotConnected, credentials_for
+from app.utils.offer_token import (
+    build_link as build_offer_link, issue as issue_offer_token,
+    redeem as redeem_offer_token,
+)
 from app.agents.jd_generator import generate_job_description
 
 router = APIRouter(prefix="/recruitment", tags=["Recruitment"])
 
-def require_ceo(current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "ceo":
-        raise HTTPException(status_code=403, detail="Only the CEO can do this")
-    return current_user
+# ══════════════════════════════════════════════
+# `require_ceo` is imported — this file's own was the widest hole
+# ══════════════════════════════════════════════
+# It read, in full:
+#
+#     def require_ceo(current_user = Depends(get_current_user)):
+#         if current_user["role"] != "ceo":
+#             raise HTTPException(403, "Only the CEO can do this")
+#         return current_user
+#
+# "Is a CEO" — of ANY company. Every route below then took an id
+# straight out of the URL and acted on it, so one company's CEO could
+# read another's applications and CVs, shortlist their candidates,
+# send offers, and DELETE a job together with all of its interviews,
+# feedback and scores.
+#
+# The shared version scopes the session to the caller's own company, and
+# the guard in `utils/tenant_guard.py` then adds `company_id = <theirs>`
+# to every query in this file. Another company's job id now simply is
+# not found — a 404, which is also the right answer, because a 403
+# would confirm the id exists.
+
+def _offer_page(title: str, body: str, good: bool) -> str:
+    """
+    What a candidate sees. One renderer for both offer routes, so a
+    refusal and a success cannot drift into looking different in ways
+    that leak which one happened.
+    """
+    colour = "#05DC7F" if good else "#facc15"
+    return f"""<!DOCTYPE html><html><head><title>{title}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{{font-family:'Segoe UI',system-ui,sans-serif;background:#0a0a0a;
+ min-height:100vh;display:flex;align-items:center;justify-content:center;
+ margin:0;padding:24px}}
+.card{{background:#111;border:1px solid {colour}66;border-radius:20px;
+ padding:44px;text-align:center;max-width:520px}}
+h1{{color:{colour};font-size:23px;margin:0 0 12px}}
+p{{color:#9ca3af;font-size:15px;line-height:1.6;margin:0}}</style></head>
+<body><div class="card"><div style="font-size:56px">{'&#10003;' if good else '&#9888;'}</div>
+<h1>{title}</h1><p>{body}</p></div></body></html>"""
+
+
+def _google_token(db, company_id: int) -> str:
+    """
+    This company's Google credentials as JSON, for the MCP subprocess.
+
+    Loaded and refreshed HERE rather than inside the MCP server: that
+    process has no database, and giving it one would create a second
+    place that decides which company a call belongs to.
+    """
+    return credentials_for(db, company_id).to_json()
+
 
 def to_string(value) -> str:
     if isinstance(value, str): return value
@@ -34,8 +88,14 @@ def to_string(value) -> str:
 async def call_mcp_tools(
     candidate_name, candidate_email, job_title, company_name,
     scheduled_date, scheduled_time, interviewer_1_email,
-    interviewer_2_email, hr_name, sender_email, sender_password
+    interviewer_2_email, hr_name, google_token
 ):
+    """
+    `sender_email` and `sender_password` used to be the same hard-coded
+    Gmail address and the one shared app password on every call. It is
+    now the calling company's own OAuth credentials, so the Meet link is
+    made on THEIR calendar and the invitation arrives from THEIR address.
+    """
     import sys
     import os
     from mcp import ClientSession, StdioServerParameters
@@ -65,7 +125,8 @@ async def call_mcp_tools(
                             candidate_email,
                             interviewer_1_email,
                             interviewer_2_email or ""
-                        ]
+                        ],
+                        "google_token": google_token
                     }
                 )
                 meet_link = meet_result.content[0].text
@@ -84,8 +145,7 @@ async def call_mcp_tools(
                         "interviewer_1_email": interviewer_1_email,
                         "interviewer_2_email": interviewer_2_email or "",
                         "hr_name": hr_name,
-                        "sender_email": sender_email,
-                        "sender_password": sender_password
+                        "google_token": google_token
                     }
                 )
                 email_sent = "successfully sent" in email_result.content[0].text.lower()
@@ -141,7 +201,7 @@ def create_job(data: JobCreate, db: Session = Depends(get_db), current_user: dic
 def get_jobs(db: Session = Depends(get_db), current_user: dict = Depends(require_ceo)):
     from app.models.user import User
     ceo = db.query(User).filter(User.id == current_user["user_id"]).first()
-    jobs = db.query(Job).filter(Job.company_name == ceo.company_name, Job.status == "published").all()
+    jobs = db.query(Job).filter(Job.status == "published").all()
     return {
         "total": len(jobs),
         "jobs": [{"id": j.id, "title": j.title, "department": j.department,
@@ -154,7 +214,16 @@ def get_jobs(db: Session = Depends(get_db), current_user: dict = Depends(require
 
 # ──── Single job ────
 @router.get("/jobs/{job_id}")
-def get_job(job_id: int, db: Session = Depends(get_db)):
+def get_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+    tenant: Tenant = Depends(get_tenant),
+):
+    """
+    Had no authentication at all — not even a login. Any id, from
+    anywhere, including unpublished roles. The public portal has its own
+    route above; this one is for the company that owns the job.
+    """
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -206,7 +275,14 @@ def delete_job(job_id: int, db: Session = Depends(get_db), current_user: dict = 
 
 # ──── Public Jobs ────
 @router.get("/public/jobs")
-def get_public_jobs(db: Session = Depends(get_db)):
+def get_public_jobs(
+    db: Session = Depends(get_db),
+    _: None = Depends(public_scope),
+):
+    """
+    The job board. Genuinely across companies — that is what a job board
+    is — and only ever `status == "published"`.
+    """
     from app.models.user import User
     jobs = db.query(Job).filter(Job.status == "published").all()
     result = []
@@ -224,9 +300,16 @@ def get_public_jobs(db: Session = Depends(get_db)):
 
 # ──── Single Public Job ────
 @router.get("/public/jobs/{job_id}")
-def get_public_job(job_id: int, db: Session = Depends(get_db)):
+def get_public_job(
+    job_id: int,
+    db: Session = Depends(get_db),
+    _: None = Depends(public_scope),
+):
     from app.models.user import User
-    job = db.query(Job).filter(Job.id == job_id).first()
+    # Published only. Without this a draft or closed role — salary band
+    # and all — was readable by anybody who guessed the id.
+    job = db.query(Job).filter(
+        Job.id == job_id, Job.status == "published").first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     ceo = db.query(User).filter(User.id == job.ceo_id).first()
@@ -239,7 +322,15 @@ def get_public_job(job_id: int, db: Session = Depends(get_db)):
 
 # ──── Applications list ────
 @router.get("/applications/{job_id}")
-def get_applications(job_id: int, db: Session = Depends(get_db), current_user: dict = Depends(require_ceo)):
+def get_applications(job_id: int, db: Session = Depends(get_db),
+                     current_user: Tenant = Depends(require_ceo)):
+    # The guard already keeps another company's applications out of the
+    # list, so this leaked nothing — it answered `200 {"total": 0}`,
+    # which says "that job exists and has no applicants". Confirming a
+    # job id and then describing it is still telling somebody something.
+    if not db.query(Job).filter(Job.id == job_id).first():
+        raise HTTPException(status_code=404, detail="Job not found")
+
     applications = db.query(Application).filter(Application.job_id == job_id).all()
     result = []
     for app in applications:
@@ -249,8 +340,14 @@ def get_applications(job_id: int, db: Session = Depends(get_db), current_user: d
             "full_name": candidate.full_name if candidate else "—",
             "email": candidate.email if candidate else "—",
             "phone": candidate.phone if candidate else "—",
-            "cv_filename": candidate.cv_filename if candidate else "—",
-            "cv_text": candidate.cv_text if candidate else "",
+            # The application's own CV — see `/download-cv` for why
+            # the candidate's copy is only a fallback.
+            "cv_filename": (app.cv_filename
+                            or (candidate.cv_filename if candidate else None)
+                            or "—"),
+            "cv_text": (app.cv_text
+                        or (candidate.cv_text if candidate else "")
+                        or ""),
             "status": app.status, "match_score": app.match_score,
             "skill_gap": app.skill_gap, "summary": app.summary,
             "applied_at": app.applied_at
@@ -265,7 +362,8 @@ async def fetch_and_screen(
     db: Session = Depends(get_db),
     current_user: dict = Depends(require_ceo)
 ):
-    from app.agents.gmail_agent import fetch_job_application_emails
+    from app.agents.gmail_agent import (
+        fetch_job_application_emails, _looks_like_a_person)
     from app.agents.cv_screening_agent import screen_cv
 
     job = db.query(Job).filter(Job.id == job_id).first()
@@ -273,9 +371,38 @@ async def fetch_and_screen(
         raise HTTPException(status_code=404, detail="Job not found")
 
     try:
-        email_applications = fetch_job_application_emails(job_title=job.title)
+        email_applications = fetch_job_application_emails(
+            db, current_user["company_id"], job_title=job.title)
+    except GoogleNotConnected as e:
+        # Not a server error — an unconnected company, and the CEO can
+        # fix it themselves. It used to fall through to a shared inbox.
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gmail fetch error: {str(e)}")
+
+    # ══════════════════════════════════════════════
+    # ONE EMAIL PER PERSON
+    # ══════════════════════════════════════════════
+    # A candidate who sends a reminder, or replies on the thread, or
+    # simply applies twice, is several messages and one applicant. Every
+    # one of them used to be screened separately — the same person, the
+    # same job, re-scored against an LLM once per message. A real fetch
+    # reported "Fetched: 11, Screened: 11" and then listed two people,
+    # which reads like nine applicants went missing. Nine did not exist.
+    #
+    # Gmail returns newest first, so the first message from an address
+    # is their most recent CV, and that is the one kept.
+    emails_found = len(email_applications)
+    seen = set()
+    deduped = []
+    for app_data in email_applications:
+        key = (app_data.get('email') or '').strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(app_data)
+    email_applications = deduped
+    duplicates = emails_found - len(email_applications)
 
     saved = 0
     screened = 0
@@ -298,9 +425,39 @@ async def fetch_and_screen(
                 elif existing_app.status in ["screened", "shortlisted",
                                               "interview_scheduled", "applied"]:
                     # ──── Update the CV and the PDF ────
+                    # On the application, so re-fetching for a second
+                    # role stops overwriting the first role's CV.
+                    existing_app.cv_text = app_data['cv_text']
+                    existing_app.cv_filename = app_data['cv_filename']
+                    existing_app.cv_pdf = app_data.get('cv_pdf')
+                    # The candidate keeps the most recent one for the
+                    # places that show a person rather than an
+                    # application.
                     existing_candidate.cv_text = app_data['cv_text']
                     existing_candidate.cv_filename = app_data['cv_filename']
-                    existing_candidate.cv_pdf = app_data.get('cv_pdf')  # ← add
+                    existing_candidate.cv_pdf = app_data.get('cv_pdf')
+
+                    # ──── And the name ────
+                    # This branch never touched `full_name`, so a
+                    # candidate filed under a bad name stayed under it
+                    # no matter how many times the CV was re-read. Two
+                    # people sat in the dashboard as "Wise Tech" — the
+                    # employer named at the top of their CV — while the
+                    # extractor, by then fixed, returned MUHAMMAD ANAS
+                    # for the very same PDF on every run.
+                    #
+                    # Only accept a name-shaped replacement: when the
+                    # PDF cannot be read the extractor falls back to the
+                    # part of the address before the @, and overwriting
+                    # a real name with "bunnyhazel9001" would be worse
+                    # than leaving it alone.
+                    fresh_name = (app_data.get('name') or '').strip()
+                    if fresh_name and fresh_name != existing_candidate.full_name:
+                        if (_looks_like_a_person(fresh_name)
+                                or not _looks_like_a_person(
+                                    existing_candidate.full_name or '')):
+                            existing_candidate.full_name = fresh_name
+
                     existing_app.status = "applied"
                     existing_app.match_score = None
                     existing_app.skill_gap = None
@@ -309,6 +466,7 @@ async def fetch_and_screen(
 
                     if app_data['cv_text']:
                         result = screen_cv(
+                            company_id=current_user["company_id"],
                             candidate_id=existing_candidate.id,
                             job_id=job.id,
                             candidate_name=existing_candidate.full_name,
@@ -351,7 +509,14 @@ async def fetch_and_screen(
 
         # ──── Create a new application ────
         application = Application(
-            candidate_id=candidate.id, job_id=job_id, status="applied"
+            candidate_id=candidate.id, job_id=job_id, status="applied",
+            # The CV AS SUBMITTED for this role. `match_score` below is
+            # computed from this text, so the two have to stay together
+            # — a score whose CV has since been replaced refers to a
+            # document nobody can open any more.
+            cv_text=app_data['cv_text'],
+            cv_pdf=app_data.get('cv_pdf'),
+            cv_filename=app_data['cv_filename'],
         )
         db.add(application)
         db.flush()
@@ -359,6 +524,7 @@ async def fetch_and_screen(
 
         if app_data['cv_text']:
             result = screen_cv(
+                company_id=current_user["company_id"],
                 candidate_id=candidate.id, job_id=job.id,
                 candidate_name=candidate.full_name, candidate_email=candidate.email,
                 cv_text=app_data['cv_text'], job_title=job.title,
@@ -384,7 +550,13 @@ async def fetch_and_screen(
 
     return {
         "message": "Gmail fetch + AI screening complete!",
+        # `total_fetched` is APPLICANTS, which is what the dashboard
+        # label means and what the list underneath it shows. The raw
+        # message count is reported separately rather than dropped —
+        # the two differing is normal, not an error.
         "total_fetched": len(email_applications),
+        "emails_found": emails_found,
+        "duplicates_skipped": duplicates,
         "saved": saved,
         "screened": screened,
         "shortlisted": shortlisted
@@ -415,7 +587,6 @@ def get_employees_for_interview(
     from app.models.user import User
     ceo = db.query(User).filter(User.id == current_user["user_id"]).first()
     employees = db.query(User).filter(
-        User.company_name == ceo.company_name,
         User.role == "employee",
         User.status == "active"
     ).all()
@@ -474,8 +645,7 @@ async def schedule_interview(
         interviewer_1_email=interviewer_1_email,
         interviewer_2_email=interviewer_2_email,
         hr_name=ceo.full_name,
-        sender_email="nirmal.naik1994@gmail.com",
-        sender_password=os.getenv("GMAIL_APP_PASSWORD")
+        google_token=_google_token(db, current_user["company_id"]),
     )
 
     # ──── Save the interview ────
@@ -522,7 +692,7 @@ def get_interviews(
     from datetime import date
 
     ceo = db.query(User).filter(User.id == current_user["user_id"]).first()
-    jobs = db.query(Job).filter(Job.company_name == ceo.company_name).all()
+    jobs = db.query(Job).all()
     job_ids = [j.id for j in jobs]
 
     interviews = db.query(Interview).filter(
@@ -598,8 +768,16 @@ def submit_feedback(
     communication_score: float = Form(...),
     notes: str = Form(""),
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user) 
+    current_user: Tenant = Depends(get_tenant),
 ):
+    """
+    An interviewer scores a candidate.
+
+    `get_current_user` proved WHO was asking and nothing about which
+    company, so an employee could post feedback — and a final score —
+    onto another company's interview by its id. The scoped session now
+    means that interview simply is not there.
+    """
     from app.models.recruitment import Interview, InterviewFeedback
     from app.models.user import User
 
@@ -662,8 +840,17 @@ def submit_feedback(
 @router.get("/my-interviews")
 def get_my_interviews(
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: Tenant = Depends(get_tenant),
 ):
+    """
+    The panels this employee sits on.
+
+    Interviews are matched to an interviewer BY EMAIL, and email is
+    unique across the whole system, so nothing crossed here in practice.
+    It is scoped anyway: "no known way in" is a statement about the
+    columns as they are today, and this route reads candidate names, CVs
+    and job titles.
+    """
     from app.models.recruitment import Interview, InterviewFeedback
     from app.models.user import User
     from datetime import date
@@ -686,6 +873,15 @@ def get_my_interviews(
         ).first()
         job = db.query(Job).filter(Job.id == interview.job_id).first()
 
+        # The CV this interview is actually about. An interviewer
+        # reading the candidate's latest CV instead of the one submitted
+        # for THIS role is the same bug as "View CV" showing the wrong
+        # document — with worse consequences, because they are about to
+        # score somebody on it.
+        interview_app = db.query(Application).filter(
+            Application.id == interview.application_id
+        ).first()
+
         feedback = db.query(InterviewFeedback).filter(
             InterviewFeedback.interview_id == interview.id
         ).first()
@@ -703,7 +899,10 @@ def get_my_interviews(
             "interview_id": interview.id,
             "candidate_name": candidate.full_name if candidate else "—",
             "candidate_email": candidate.email if candidate else "—",
-            "candidate_cv_text": candidate.cv_text if candidate else "",
+            "candidate_cv_text": (
+                (interview_app.cv_text if interview_app else None)
+                or (candidate.cv_text if candidate else "")
+                or ""),
             "job_title": job.title if job else "—",
             "company_name": job.company_name if job else "—",
             "scheduled_date": str(interview.scheduled_date),
@@ -727,6 +926,12 @@ def get_ranked_candidates(
     current_user: dict = Depends(require_ceo)
 ):
     from app.models.recruitment import FinalScore, Interview
+
+    # Same reason as `/applications/{job_id}`: the guard kept another
+    # company's scores out, but answering 200 for their job id still
+    # confirmed it exists.
+    if not db.query(Job).filter(Job.id == job_id).first():
+        raise HTTPException(status_code=404, detail="Job not found")
 
     final_scores = db.query(FinalScore).filter(
         FinalScore.job_id == job_id
@@ -816,14 +1021,23 @@ async def hire_candidate(
     application.status = "hired"
     db.commit()
 
-    # ──── Accept Link ────
+    # ══════════════════════════════════════════════
+    # The accept link
+    # ══════════════════════════════════════════════
+    # This was `f".../accept-offer/{application_id}"` — the row's primary
+    # key, in a public URL, as the only thing authorising acceptance.
+    # Anybody could count upwards and accept offers belonging to any
+    # company. The link now carries a 256-bit single-use token and the
+    # database keeps only its hash; see `utils/offer_token.py`.
     ngrok_url = os.getenv("NGROK_URL", "http://127.0.0.1:8000")
-    accept_link = f"{ngrok_url}/recruitment/accept-offer/{application_id}?ngrok-skip-browser-warning=true"
+    offer_token = issue_offer_token(db, application)
+    accept_link = build_offer_link(ngrok_url, offer_token)
     today = datetime.now().strftime("%B %d, %Y")
 
     # ──── Offer letter email via MCP ────
     email_sent = False
     try:
+        google_token = _google_token(db, current_user["company_id"])
         server_params = StdioServerParameters(
             command=sys.executable,
             args=[os.path.join(os.path.dirname(__file__), "..", "mcp_servers", "meeting_email_server.py")],
@@ -844,8 +1058,7 @@ async def hire_candidate(
                         "ceo_name": ceo.full_name,
                         "accept_link": accept_link,
                         "offer_date": today,
-                        "sender_email": "nirmal.naik1994@gmail.com",
-                        "sender_password": os.getenv("GMAIL_APP_PASSWORD")
+                        "google_token": google_token
                     }
                 )
                 email_sent = "sent" in result.content[0].text.lower()
@@ -862,36 +1075,105 @@ async def hire_candidate(
 
 # ──── Accept the offer ────
 @router.get("/accept-offer/{application_id}")
-async def accept_offer(
+async def accept_offer_retired(
     application_id: int,
-    db: Session = Depends(get_db)
+    _: None = Depends(public_scope),
 ):
+    """
+    The old link shape. It does nothing now, deliberately.
+
+    ═══ WHAT IT USED TO DO ═══
+    Read the application by the id in the URL and, if its status was
+    `hired`, set it to `accepted` and send the onboarding email. Public,
+    unauthenticated, and keyed on a counter — so walking 1, 2, 3…
+    accepted offers belonging to any company in the system.
+
+    It is kept rather than deleted so that an offer email already in
+    somebody's inbox gets an explanation instead of a 404, and it is
+    inert rather than redirected: honouring the old id even once would
+    leave the hole open.
+    """
+    from fastapi.responses import HTMLResponse
+
+    return HTMLResponse(
+        content=_offer_page(
+            "This link has expired",
+            "Offer links were replaced with secure, single-use ones. "
+            "Please ask your contact at the company to send you a new "
+            "offer email.", False),
+        headers={"ngrok-skip-browser-warning": "true"})
+
+
+# ──── Accept the offer (the real one) ────
+@router.get("/offer/{token}")
+async def accept_offer(
+    token: str,
+    db: Session = Depends(get_db),
+    _: None = Depends(public_scope),
+):
+    """
+    Opened by the candidate from their offer email.
+
+    There is no session and no company to scope to — the candidate has
+    no account — so the LINK is the authorisation. `utils/offer_token.py`
+    holds the reasoning; in short: 256 random bits, stored only as a
+    SHA-256 digest, usable once, and expiring.
+
+    Every failure returns the same page. Telling an unauthenticated
+    caller whether a token was unknown, expired or already used would
+    confirm which tokens exist.
+    """
     import sys
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
     from datetime import datetime, timedelta
     from fastapi.responses import HTMLResponse
 
-    application = db.query(Application).filter(
-        Application.id == application_id
-    ).first()
-    if not application:
-        raise HTTPException(status_code=404, detail="Application not found")
+    application, reason = redeem_offer_token(db, token)
 
-    if application.status != "hired":
-        html = """<!DOCTYPE html><html><head><title>Already Processed</title>
-        <style>body{font-family:'Segoe UI',sans-serif;background:#0a0a0a;min-height:100vh;display:flex;align-items:center;justify-content:center;}
-        .card{background:#111;border:1px solid rgba(250,204,21,0.4);border-radius:20px;padding:48px;text-align:center;max-width:500px;}
-        h1{color:#facc15;font-size:24px;margin-bottom:12px;}p{color:#9ca3af;font-size:16px;}</style></head>
-        <body><div class="card"><div style="font-size:64px">⚠️</div>
-        <h1>Already Processed</h1><p>This offer has already been accepted or is no longer valid.</p>
-        </div></body></html>"""
-        response = HTMLResponse(content=html)
-        response.headers["ngrok-skip-browser-warning"] = "true"
-        return response
+    # ═══ A SWITCHED-OFF COMPANY CANNOT ONBOARD ANYBODY ═══
+    # The tenant guard has nothing to say on this route — it is public,
+    # so there is no session to scope. But accepting an offer starts an
+    # employment, and a suspended company is one that has been stopped.
+    # An outstanding link would otherwise quietly create a new employee
+    # inside a tenant that nobody can sign in to.
+    if application is not None:
+        from app.models.company import Company, LIVE_STATUSES
+        company = db.query(Company).filter(
+            Company.id == application.company_id).first()
+        if not company or company.status not in LIVE_STATUSES:
+            application, reason = None, "company_not_live"
+
+    if not application:
+        # Logged with the reason; the caller is told nothing.
+        print(f"[offer] refused a token: {reason}")
+        return HTMLResponse(
+            content=_offer_page(
+                "This link is no longer valid",
+                "It may have already been used, or it may have expired. "
+                "Please ask your contact at the company for a new offer "
+                "email.", False),
+            headers={"ngrok-skip-browser-warning": "true"})
+
+    application_id = application.id
 
     application.status = "accepted"
     db.commit()
+
+    # ═══ NO TENANT ON THIS REQUEST, SO THE ROW DECIDES ═══
+    # The candidate opens this from their offer email; there is no login
+    # and no company on the session. The company is the one that OWNS
+    # THE APPLICATION, read from the row rather than from anything the
+    # caller supplied — so the onboarding email goes out through that
+    # company's Google account and no other.
+    google_token = None
+    try:
+        google_token = _google_token(db, application.company_id)
+    except GoogleNotConnected:
+        # They accepted; that has been recorded. The onboarding email
+        # simply will not go until the company connects Google, and the
+        # acceptance page below still shows.
+        pass
 
     candidate = db.query(Candidate).filter(
         Candidate.id == application.candidate_id
@@ -918,8 +1200,7 @@ async def accept_offer(
                         "job_title": job.title,
                         "company_name": job.company_name,
                         "joining_date": joining_date,
-                        "sender_email": "nirmal.naik1994@gmail.com",
-                        "sender_password": os.getenv("GMAIL_APP_PASSWORD")
+                        "google_token": google_token
                     }
                 )
     except Exception as e:
@@ -996,7 +1277,7 @@ def get_all_employees(
     from app.models.recruitment import FinalScore
 
     ceo = db.query(User).filter(User.id == current_user["user_id"]).first()
-    jobs = db.query(Job).filter(Job.company_name == ceo.company_name).all()
+    jobs = db.query(Job).all()
     job_ids = [j.id for j in jobs]
 
     result = []
@@ -1025,7 +1306,7 @@ def get_all_employees(
     # Whitelist, not "!= fired" — see utils/workforce.py
     from app.utils.workforce import EMPLOYED, NOT_YET
     created_employees = db.query(User).filter(
-        User.company_name == ceo.company_name,
+        # company scoping is applied by the tenant guard
         User.role == "employee",
         User.status.in_(tuple(EMPLOYED) + tuple(NOT_YET)),
     ).all()
@@ -1055,7 +1336,7 @@ def get_hired_employees(
     from app.models.recruitment import FinalScore
 
     ceo = db.query(User).filter(User.id == current_user["user_id"]).first()
-    jobs = db.query(Job).filter(Job.company_name == ceo.company_name).all()
+    jobs = db.query(Job).all()
     job_ids = [j.id for j in jobs]
 
     applications = db.query(Application).filter(
@@ -1133,7 +1414,7 @@ def get_dashboard_stats(
     from app.models.recruitment import Interview
 
     ceo = db.query(User).filter(User.id == current_user["user_id"]).first()
-    jobs = db.query(Job).filter(Job.company_name == ceo.company_name).all()
+    jobs = db.query(Job).all()
     job_ids = [j.id for j in jobs]
 
     # ──── Stats ────
@@ -1177,8 +1458,17 @@ def get_dashboard_stats(
 def download_cv(
     application_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    tenant: Tenant = Depends(get_tenant),
 ):
+    """
+    A candidate's CV — name, phone, email, work history.
+
+    This asked only for a valid login. ANY employee of ANY company could
+    walk the application ids and download every CV in the database.
+
+    `get_tenant` scopes the session, so the lookup below cannot see
+    another company's application at all.
+    """
     from fastapi.responses import Response
 
     application = db.query(Application).filter(
@@ -1193,11 +1483,25 @@ def download_cv(
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
 
+    # ══════════════════════════════════════════════
+    # THIS APPLICATION'S CV, not the candidate's latest
+    # ══════════════════════════════════════════════
+    # This used to read `candidate.cv_pdf` — one document per person.
+    # `fetch-and-screen` overwrote it whenever that address turned up
+    # again, so somebody who applied for two roles had both applications
+    # showing whichever CV was read last. Right or wrong depending on
+    # the order the mailbox came back in.
+    #
+    # The application carries its own copy now. The candidate's is the
+    # fallback for rows written before that change and never re-fetched.
+    cv_pdf = application.cv_pdf or candidate.cv_pdf
+    cv_text = application.cv_text or candidate.cv_text
+
     # ──── Send the original PDF if there is one ────
-    if candidate.cv_pdf:
+    if cv_pdf:
         filename = f"{candidate.full_name or 'CV'}_CV.pdf".replace(" ", "_")
         return Response(
-            content=candidate.cv_pdf,
+            content=cv_pdf,
             media_type="application/pdf",
             headers={
                 "Content-Disposition": f"attachment; filename={filename}",
@@ -1220,8 +1524,8 @@ def download_cv(
     story.append(Paragraph(candidate.email or "", styles['Normal']))
     story.append(Spacer(1, 12))
 
-    if candidate.cv_text:
-        for line in candidate.cv_text.split('\n'):
+    if cv_text:
+        for line in cv_text.split('\n'):
             if line.strip():
                 try:
                     story.append(Paragraph(line.strip(), styles['Normal']))
@@ -1272,6 +1576,8 @@ async def reject_candidate(
     application.status = "rejected"
     db.commit()
 
+    google_token = _google_token(db, current_user["company_id"])
+
     # ──── Rejection email via MCP ────
     email_sent = False
     try:
@@ -1290,8 +1596,7 @@ async def reject_candidate(
                         "job_title": job.title,
                         "company_name": job.company_name,
                         "ceo_name": ceo.full_name,
-                        "sender_email": "nirmal.naik1994@gmail.com",
-                        "sender_password": os.getenv("GMAIL_APP_PASSWORD")
+                        "google_token": google_token
                     }
                 )
                 email_sent = "sent" in result.content[0].text.lower()

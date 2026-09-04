@@ -39,6 +39,7 @@ from sqlalchemy.orm import Session
 from datetime import datetime
 
 from app.database import get_db
+from app.utils.tenancy import Tenant, get_tenant, require_ceo
 from app.models.payroll import (
     CompanyBranding, SalaryStructure, PayrollPolicy, PayrollRun, Payslip
 )
@@ -173,11 +174,11 @@ def save_branding(
         raise HTTPException(400, "Colour must look like '#05DC7F'")
 
     row = db.query(CompanyBranding).filter(
-        CompanyBranding.company_id == ceo.id
+        CompanyBranding.company_id == ceo.company_id
     ).first()
 
     if not row:
-        row = CompanyBranding(company_id=ceo.id)
+        row = CompanyBranding(company_id=current_user["company_id"])
         db.add(row)
 
     row.primary_color = color
@@ -188,7 +189,7 @@ def save_branding(
     row.set_by = ceo.id
     db.commit()
 
-    return {"message": "Branding saved", "company_id": ceo.id}
+    return {"message": "Branding saved", "company_id": ceo.company_id}
 
 
 # ══════════════════════════════════════════════
@@ -224,10 +225,10 @@ async def upload_logo(
         raise HTTPException(400, "The logo must be an image (PNG/JPG), not a PDF")
 
     row = db.query(CompanyBranding).filter(
-        CompanyBranding.company_id == ceo.id
+        CompanyBranding.company_id == ceo.company_id
     ).first()
     if not row:
-        row = CompanyBranding(company_id=ceo.id)
+        row = CompanyBranding(company_id=current_user["company_id"])
         db.add(row)
 
     row.logo_data = prepared["data"]
@@ -249,7 +250,7 @@ async def upload_logo(
 @router.get("/branding")
 def get_branding(
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: Tenant = Depends(get_tenant),
 ):
     """
     Employees can read this too — the logo and address are not secrets, and
@@ -285,7 +286,7 @@ def get_branding(
 @router.get("/branding/logo")
 def get_logo(
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: Tenant = Depends(get_tenant),
 ):
     """Your own company's logo — company_id comes from the token, not the URL"""
     user = get_user_or_404(db, current_user["user_id"])
@@ -337,11 +338,12 @@ def save_salary_structure(
     ).first()
 
     if not row:
-        row = SalaryStructure(employee_id=employee.id, company_id=ceo.id)
+        row = SalaryStructure(employee_id=employee.id,
+                              company_id=current_user["company_id"])
         db.add(row)
     else:
         # If the existing row belongs to another company, do not touch it
-        if row.company_id != ceo.id:
+        if row.company_id != ceo.company_id:
             raise HTTPException(403, "This record does not belong to your company")
 
     row.base_salary = base
@@ -413,7 +415,7 @@ def list_salary_structures(
     rows = {
         r.employee_id: r
         for r in db.query(SalaryStructure).filter(
-            SalaryStructure.company_id == ceo.id
+            SalaryStructure.company_id == ceo.company_id
         ).all()
     }
 
@@ -448,7 +450,7 @@ def list_salary_structures(
 def get_salary_structure(
     employee_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: Tenant = Depends(get_tenant),
 ):
     """
     An employee sees only THEIR OWN; the CEO sees anyone in their company.
@@ -489,10 +491,10 @@ def save_payroll_policy(
         raise HTTPException(400, f"absent_deduction must be one of: {ABSENT_MODES}")
 
     row = db.query(PayrollPolicy).filter(
-        PayrollPolicy.company_id == ceo.id
+        PayrollPolicy.company_id == ceo.company_id
     ).first()
     if not row:
-        row = PayrollPolicy(company_id=ceo.id)
+        row = PayrollPolicy(company_id=current_user["company_id"])
         db.add(row)
 
     row.overtime_multiplier = ratio(data.overtime_multiplier, "Overtime multiplier")
@@ -531,7 +533,7 @@ def _policy_out(row: PayrollPolicy) -> dict:
 @router.get("/policy")
 def get_payroll_policy(
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: Tenant = Depends(get_tenant),
 ):
     """
     Employees can see this too — these are the company's RULES, not
@@ -601,7 +603,7 @@ def run_payroll(
 
     # ──── Is there already a run? ────
     existing = db.query(PayrollRun).filter(
-        PayrollRun.company_id == ceo.id,
+        PayrollRun.company_id == ceo.company_id,
         PayrollRun.period == data.period,
         PayrollRun.status != "cancelled",
     ).order_by(PayrollRun.attempt.desc()).first()
@@ -659,7 +661,7 @@ def run_payroll(
     # somebody's February through May before they started in June.
     from app.utils.workforce import employed_during
 
-    employees = employed_during(db, ceo.id, data.period)
+    employees = employed_during(db, ceo.company_id, data.period)
     if not employees:
         raise HTTPException(
             400,
@@ -668,7 +670,7 @@ def run_payroll(
         )
 
     run = PayrollRun(
-        company_id=ceo.id,
+        company_id=current_user["company_id"],
         period=data.period,
         attempt=attempt,
         triggered_by="ceo",
@@ -687,7 +689,7 @@ def run_payroll(
     results = []
 
     for emp in employees:
-        out = run_for_employee(db, emp.id, ceo.id, data.period, run.id)
+        out = run_for_employee(db, emp.id, ceo.company_id, data.period, run.id)
 
         if out["status"] == "computed":
             done += 1
@@ -745,7 +747,7 @@ def list_runs(
 ):
     ceo = get_user_or_404(db, current_user["user_id"])
     runs = db.query(PayrollRun).filter(
-        PayrollRun.company_id == ceo.id
+        PayrollRun.company_id == ceo.company_id
     ).order_by(PayrollRun.period.desc(), PayrollRun.attempt.desc()).all()
 
     return {
@@ -789,7 +791,7 @@ def get_run(
 
     run = db.query(PayrollRun).filter(
         PayrollRun.id == run_id,
-        PayrollRun.company_id == ceo.id,
+        PayrollRun.company_id == ceo.company_id,
     ).first()
     if not run:
         raise HTTPException(404, "Run not found")
@@ -835,7 +837,7 @@ def get_run(
 def my_slips(
     employee_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: Tenant = Depends(get_tenant),
 ):
     """
     An employee sees all of their own slips.
@@ -885,7 +887,7 @@ def my_slips(
 def get_slip(
     payslip_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: Tenant = Depends(get_tenant),
 ):
     """
     The slip's full breakdown — with the snapshots and calculation steps.
@@ -956,7 +958,7 @@ def get_slip(
 def download_slip(
     payslip_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: Tenant = Depends(get_tenant),
 ):
     """
     The slip as a PDF.
@@ -1022,7 +1024,7 @@ def regenerate_pdfs(
 
     ceo = get_user_or_404(db, current_user["user_id"])
     run = db.query(PayrollRun).filter(
-        PayrollRun.id == run_id, PayrollRun.company_id == ceo.id
+        PayrollRun.id == run_id, PayrollRun.company_id == ceo.company_id
     ).first()
     if not run:
         raise HTTPException(404, "Run not found")
@@ -1033,7 +1035,7 @@ def regenerate_pdfs(
 
     done, failed = 0, 0
     for s in slips:
-        out = generate_slip_pdf(db, s.id, ceo.id)
+        out = generate_slip_pdf(db, s.id, ceo.company_id)
         if out["status"] == "generated":
             done += 1
         else:
@@ -1052,7 +1054,8 @@ def regenerate_pdfs(
 # ══════════════════════════════════════════════
 # Payslip email — via MCP
 # ══════════════════════════════════════════════
-async def _email_slips_via_mcp(company_name: str, slips: list) -> dict:
+async def _email_slips_via_mcp(db, company_id: int, company_name: str,
+                               slips: list) -> dict:
     """
     Send the slips through MCP's `send_payroll_email` tool.
 
@@ -1072,19 +1075,21 @@ async def _email_slips_via_mcp(company_name: str, slips: list) -> dict:
     import base64
     import os
 
-    # The same sender the whole system uses — `notify.py` uses it too.
-    # A new env var would mean two addresses in two places, and employees
-    # would sometimes get mail from a different one.
-    from app.utils.notify import SENDER_EMAIL, SENDER_PASSWORD
+    # ═══ THE SENDER IS THE COMPANY, NOT THE SYSTEM ═══
+    # This used to read `SENDER_EMAIL`/`SENDER_PASSWORD` from
+    # `utils/notify.py` — one address and one app password shared by
+    # every company — with the comment "the same sender the whole system
+    # uses". That was right when there was one company. Now an employee
+    # of one company would receive their payslip from another company's
+    # Gmail address.
+    from app.utils.google_auth import GoogleNotConnected, credentials_for
 
-    sender = SENDER_EMAIL or ""
-    password = SENDER_PASSWORD or ""
-
-    if not sender or not password:
+    try:
+        google_token = credentials_for(db, company_id).to_json()
+    except GoogleNotConnected as e:
         return {
             "ok": False,
-            "reason": "Gmail credentials are not set (GMAIL_APP_PASSWORD) - "
-                      "the slips were generated but not emailed",
+            "reason": f"{e} The slips were generated but not emailed.",
             "results": {},
         }
 
@@ -1123,8 +1128,7 @@ async def _email_slips_via_mcp(company_name: str, slips: list) -> dict:
                             "currency": item["currency"],
                             "company_name": company_name,
                             "pdf_base64": base64.b64encode(item["pdf"]).decode(),
-                            "sender_email": sender,
-                            "sender_password": password,
+                            "google_token": google_token,
                         })
                         text = ""
                         for c in (out.content or []):
@@ -1174,7 +1178,7 @@ async def approve_run(
     ceo = get_user_or_404(db, current_user["user_id"])
 
     run = db.query(PayrollRun).filter(
-        PayrollRun.id == run_id, PayrollRun.company_id == ceo.id
+        PayrollRun.id == run_id, PayrollRun.company_id == ceo.company_id
     ).first()
     if not run:
         raise HTTPException(404, "Run not found")
@@ -1223,7 +1227,8 @@ async def approve_run(
                    "results": {}}
     elif to_send:
         company_name = getattr(ceo, "company_name", None) or "Company"
-        outcome = await _email_slips_via_mcp(company_name, to_send)
+        outcome = await _email_slips_via_mcp(
+            db, current_user["company_id"], company_name, to_send)
     else:
         outcome = {"ok": True, "reason": "", "results": {}}
 
@@ -1277,7 +1282,7 @@ async def resend_slip_email(
     ceo = get_user_or_404(db, current_user["user_id"])
 
     slip = db.query(Payslip).filter(
-        Payslip.id == payslip_id, Payslip.company_id == ceo.id
+        Payslip.id == payslip_id, Payslip.company_id == ceo.company_id
     ).first()
     if not slip:
         raise HTTPException(404, "Slip not found")
@@ -1299,6 +1304,7 @@ async def resend_slip_email(
                 "sent": False}
 
     outcome = await _email_slips_via_mcp(
+        db, ceo.company_id,
         getattr(ceo, "company_name", None) or "Company",
         [{
             "payslip_id": slip.id,
@@ -1377,7 +1383,7 @@ def add_adjustment(
         raise HTTPException(400, "The amount must be greater than zero")
 
     row = PayrollAdjustment(
-        company_id=ceo.id,
+        company_id=current_user["company_id"],
         employee_id=employee.id,
         period=data.period,
         kind=data.kind,
@@ -1400,7 +1406,7 @@ def list_adjustments(
     period: str,
     employee_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: Tenant = Depends(get_tenant),
 ):
     """
     That month's adjustments.
@@ -1458,7 +1464,7 @@ def delete_adjustment(
     ceo = get_user_or_404(db, current_user["user_id"])
     row = db.query(PayrollAdjustment).filter(
         PayrollAdjustment.id == adjustment_id,
-        PayrollAdjustment.company_id == ceo.id,
+        PayrollAdjustment.company_id == ceo.company_id,
     ).first()
     if not row:
         raise HTTPException(404, "Adjustment not found")
@@ -1514,7 +1520,7 @@ def create_loan(
         raise HTTPException(400, "Give the loan a title (e.g. 'Bike advance')")
 
     row = EmployeeLoan(
-        company_id=ceo.id,
+        company_id=current_user["company_id"],
         employee_id=employee.id,
         title=title[:120],
         principal=principal,
@@ -1563,7 +1569,7 @@ def _loan_out(db, loan, employee_name=None) -> dict:
 def list_loans(
     employee_id: Optional[int] = None,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: Tenant = Depends(get_tenant),
 ):
     """
     The list of loans — the outstanding amount is DERIVED, never counted.
@@ -1611,7 +1617,7 @@ def cancel_loan(
 
     ceo = get_user_or_404(db, current_user["user_id"])
     loan = db.query(EmployeeLoan).filter(
-        EmployeeLoan.id == loan_id, EmployeeLoan.company_id == ceo.id
+        EmployeeLoan.id == loan_id, EmployeeLoan.company_id == ceo.company_id
     ).first()
     if not loan:
         raise HTTPException(404, "Loan not found")

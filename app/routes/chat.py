@@ -52,6 +52,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.utils.tenancy import Tenant, get_tenant, require_ceo
 from app.models.chat import ChatSession, ChatMessage, HrRequest
 from app.models.user import User
 from app.utils.company import (
@@ -141,7 +142,7 @@ def _msg_out(m: ChatMessage) -> dict:
 def send_message(
     data: MessageIn,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: Tenant = Depends(get_tenant),
 ):
     """
     The employee asks; the help desk answers.
@@ -252,7 +253,7 @@ def send_message(
 def confirm_request(
     data: ConfirmIn,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: Tenant = Depends(get_tenant),
 ):
     """
     Turn a draft into an `hr_requests` row the CEO will see.
@@ -302,9 +303,16 @@ def confirm_request(
     try:
         from app.utils import notify
 
-        ceo = db.query(User).filter(User.id == company_id).first()
+        # ═══ A COMPANY ID IS NOT A USER ID ═══
+        # This read `User.id == company_id`, which was true only while a
+        # company WAS its CEO's user row. For any company registered since,
+        # it returns None — and the email simply never goes, with nothing
+        # said anywhere.
+        ceo = db.query(User).filter(
+            User.company_id == company_id, User.role == "ceo").first()
         if ceo and ceo.email:
             notify.send_email(
+                company_id=company_id,
                 to=ceo.email,
                 subject=f"HR request — {user.full_name}",
                 body=(
@@ -337,7 +345,7 @@ def confirm_request(
 @router.get("/sessions")
 def list_sessions(
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: Tenant = Depends(get_tenant),
 ):
     """Only ever the caller's own — there is no parameter for anyone else."""
     rows = db.query(ChatSession).filter(
@@ -358,7 +366,7 @@ def list_sessions(
 def get_session(
     session_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: Tenant = Depends(get_tenant),
 ):
     session = _own_session(db, session_id, current_user["user_id"])
     msgs = db.query(ChatMessage).filter(
@@ -376,7 +384,7 @@ def get_session(
 def delete_session(
     session_id: int,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: Tenant = Depends(get_tenant),
 ):
     """
     The employee can delete their own thread.
@@ -400,7 +408,7 @@ def delete_session(
 def list_requests(
     status: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: Tenant = Depends(get_tenant),
 ):
     user = get_user_or_404(db, current_user["user_id"])
     company_id = resolve_company_id(db, user) or user.id
@@ -457,7 +465,7 @@ def resolve_request(
 
     req = db.query(HrRequest).filter(
         HrRequest.id == request_id,
-        HrRequest.company_id == ceo.id,
+        HrRequest.company_id == ceo.company_id,
     ).first()
     if not req:
         raise HTTPException(404, "Request not found")
@@ -509,6 +517,7 @@ def resolve_request(
 
         if employee and employee.email:
             notify.send_email(
+                company_id=company_id,
                 to=employee.email,
                 subject=f"HR request {status} — {req.subject}",
                 body=(
@@ -540,7 +549,7 @@ def download_letter(
     kind: str = "employment",
     include_salary: bool = False,
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user),
+    current_user: Tenant = Depends(get_tenant),
 ):
     """
     The letter the CEO approved, as a PDF.

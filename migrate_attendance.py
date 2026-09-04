@@ -15,7 +15,23 @@ Run:  py migrate_attendance.py     (from the Backend/ folder)
 import os
 
 from sqlalchemy import text
-from app.database import engine, SessionLocal, Base
+# ──── DDL needs the owner, and the data work needs a declared scope ────
+# `agentra_app` deliberately cannot ALTER TABLE, and the tenant guard
+# refuses queries on a session that has not said which company it is
+# for. A migration is both privileged and cross-company, so it says so.
+from sqlalchemy.orm import sessionmaker
+
+from app.database import admin_engine, Base
+from app.utils.tenant_guard import bind_unscoped
+
+engine = admin_engine()
+_Session = sessionmaker(bind=engine)
+
+
+def SessionLocal():          # noqa: N802
+    s = _Session()
+    bind_unscoped(s, "migrate_attendance: schema migration, all companies")
+    return s
 from app.models.user import User          # noqa: F401  (FK target)
 from app.models import attendance as attendance_models
 from app.models.chat import (

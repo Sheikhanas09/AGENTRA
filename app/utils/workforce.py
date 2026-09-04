@@ -60,18 +60,28 @@ FORMER = ("fired", "resigned", "retired", "contract_ended")
 NOT_YET = ("pending", "approved", "inactive")
 
 
-def _company_of(db: Session, company_id: int) -> Optional[str]:
-    """`company_id` is the CEO's own user id in this system."""
-    ceo = db.query(User).filter(User.id == company_id).first()
-    return ceo.company_name if ceo else None
-
-
 def _base(db: Session, company_id: int):
-    name = _company_of(db, company_id)
-    if not name:
+    """
+    Every employee of one company.
+
+    ═══ THIS USED TO GO THROUGH THE COMPANY'S NAME ═══
+        ceo  = db.query(User).filter(User.id == company_id).first()
+        name = ceo.company_name
+        return db.query(User).filter(User.company_name == name, ...)
+
+    Two hops and a string in the middle. It read the CEO's row to get a
+    name and then matched other rows on that text, so the whole payroll
+    and every automated email depended on those strings agreeing. A CEO
+    renaming their company changed one of them and not the others, and
+    from that moment this returned nothing: no employees, no payroll, no
+    reminders, headcount zero — with nothing raised anywhere.
+
+    One hop and a foreign key now.
+    """
+    if not company_id:
         return None
     return db.query(User).filter(
-        User.company_name == name,
+        User.company_id == company_id,
         User.role == "employee",
     )
 
