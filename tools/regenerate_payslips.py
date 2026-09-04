@@ -1,10 +1,10 @@
 """
 Recompute payslips that the joining-date bug got wrong
 ──────────────────────────────────────────────────────
-    py regenerate_payslips.py              show what would change
-    py regenerate_payslips.py --apply      rewrite the affected slips
-    py regenerate_payslips.py --apply --include-policy-drift
-    py regenerate_payslips.py --apply --include-sent
+    py tools/regenerate_payslips.py              show what would change
+    py tools/regenerate_payslips.py --apply      rewrite the affected slips
+    py tools/regenerate_payslips.py --apply --include-policy-drift
+    py tools/regenerate_payslips.py --apply --include-sent
 
 WHAT WENT WRONG
 ───────────────
@@ -39,7 +39,21 @@ Nothing here reimplements payroll arithmetic.
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# (purana bootstrap hataya: move ke baad yeh apne hi folder ko
+#  daal raha tha, Backend/ ko nahi)
+
+# ──── Backend/ ko raaste par lao ────
+# Yeh script Backend/ ke andar ek folder mein hai. `py tests/x.py`
+# chalane par Python sirf us folder ko sys.path par rakhta hai, cwd ko
+# nahi — to `import app` nakaam ho jata. Aur kuch checks source tree ko
+# `Path("app")` se scan karte hain, jo cwd par munhasir hai.
+import os as _os
+import sys as _sys
+
+_BACKEND = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _BACKEND not in _sys.path:
+    _sys.path.insert(0, _BACKEND)
+_os.chdir(_BACKEND)
 
 from app.agents.payroll_agent import run_for_employee
 # ──── This script works across companies, and says so ────

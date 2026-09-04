@@ -9,7 +9,7 @@ This script:
   3. Creates the attendance_photos table
   4. Imports old uploads/faces/ photos into the DB
 
-Run:  py migrate_attendance.py     (from the Backend/ folder)
+Run:  py migrations/migrate_attendance.py     (from the Backend/ folder)
 """
 
 import os
@@ -20,6 +20,19 @@ from sqlalchemy import text
 # refuses queries on a session that has not said which company it is
 # for. A migration is both privileged and cross-company, so it says so.
 from sqlalchemy.orm import sessionmaker
+
+# ──── Backend/ ko raaste par lao ────
+# Yeh script Backend/ ke andar ek folder mein hai. `py tests/x.py`
+# chalane par Python sirf us folder ko sys.path par rakhta hai, cwd ko
+# nahi — to `import app` nakaam ho jata. Aur kuch checks source tree ko
+# `Path("app")` se scan karte hain, jo cwd par munhasir hai.
+import os as _os
+import sys as _sys
+
+_BACKEND = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _BACKEND not in _sys.path:
+    _sys.path.insert(0, _BACKEND)
+_os.chdir(_BACKEND)
 
 from app.database import admin_engine, Base
 from app.utils.tenant_guard import bind_unscoped

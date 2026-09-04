@@ -4,8 +4,8 @@ Per-company Google accounts
 Creates `company_integrations`, and moves the ONE existing
 `app/token.json` into it as the company that has actually been using it.
 
-    py migrate_integrations.py            show what it would do
-    py migrate_integrations.py --apply    do it
+    py migrations/migrate_integrations.py            show what it would do
+    py migrations/migrate_integrations.py --apply    do it
 
 Idempotent.
 
@@ -36,6 +36,19 @@ import sys
 
 from sqlalchemy import text
 from sqlalchemy.orm import sessionmaker
+
+# ──── Backend/ ko raaste par lao ────
+# Yeh script Backend/ ke andar ek folder mein hai. `py tests/x.py`
+# chalane par Python sirf us folder ko sys.path par rakhta hai, cwd ko
+# nahi — to `import app` nakaam ho jata. Aur kuch checks source tree ko
+# `Path("app")` se scan karte hain, jo cwd par munhasir hai.
+import os as _os
+import sys as _sys
+
+_BACKEND = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _BACKEND not in _sys.path:
+    _sys.path.insert(0, _BACKEND)
+_os.chdir(_BACKEND)
 
 from app.database import admin_engine
 from app.models.company import Company

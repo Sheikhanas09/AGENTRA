@@ -1,7 +1,7 @@
 """
 The CV, the name, and the count
 ───────────────────────────────
-    py check_cv.py
+    py tests/check_cv.py
 
 Three things went wrong on one screen, reported together:
 
@@ -25,6 +25,19 @@ import secrets                                                   # noqa: E402
 
 import fitz                                                      # noqa: E402
 from fastapi.testclient import TestClient                        # noqa: E402
+
+# ──── Backend/ ko raaste par lao ────
+# Yeh script Backend/ ke andar ek folder mein hai. `py tests/x.py`
+# chalane par Python sirf us folder ko sys.path par rakhta hai, cwd ko
+# nahi — to `import app` nakaam ho jata. Aur kuch checks source tree ko
+# `Path("app")` se scan karte hain, jo cwd par munhasir hai.
+import os as _os
+import sys as _sys
+
+_BACKEND = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _BACKEND not in _sys.path:
+    _sys.path.insert(0, _BACKEND)
+_os.chdir(_BACKEND)
 
 from app.main import app                                         # noqa: E402
 from app.agents.gmail_agent import (                             # noqa: E402

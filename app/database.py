@@ -16,7 +16,7 @@ load_dotenv()
 # ⚠ THE ROLE MATTERS AS MUCH AS THE URL. Postgres lets superusers ignore
 # row-level security entirely, so connecting as `postgres` silently turns
 # off the second wall — no error, no warning, just no protection. Run
-# `py migrate_rls.py --apply`, then point this at the `agentra_app` role
+# `py migrations/migrate_rls.py --apply`, then point this at the `agentra_app` role
 # it creates. `check_tenancy.py` reports which role is actually in use.
 _FALLBACK_DB = "postgresql://postgres:12345@localhost:5432/agentra"
 

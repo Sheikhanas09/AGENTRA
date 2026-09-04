@@ -1,8 +1,8 @@
 """
 Is one company's data reachable from another?
 ─────────────────────────────────────────────
-    py check_tenancy.py           run everything
-    py check_tenancy.py --show    print the responses too
+    py tests/check_tenancy.py           run everything
+    py tests/check_tenancy.py --show    print the responses too
 
 Eleven sections. The last three do not read the code — they log in as one
 company and try to take another's data over HTTP, because a review of
@@ -40,6 +40,19 @@ from sqlalchemy import text                                    # noqa: E402
 # maintenance is one people learn to ignore, so it finds them itself.
 import importlib               # noqa: E402
 import pkgutil                 # noqa: E402
+
+# ──── Backend/ ko raaste par lao ────
+# Yeh script Backend/ ke andar ek folder mein hai. `py tests/x.py`
+# chalane par Python sirf us folder ko sys.path par rakhta hai, cwd ko
+# nahi — to `import app` nakaam ho jata. Aur kuch checks source tree ko
+# `Path("app")` se scan karte hain, jo cwd par munhasir hai.
+import os as _os
+import sys as _sys
+
+_BACKEND = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _BACKEND not in _sys.path:
+    _sys.path.insert(0, _BACKEND)
+_os.chdir(_BACKEND)
 
 import app.models              # noqa: E402
 
@@ -542,7 +555,7 @@ def section_rls():
 
         if unprotected:
             fail(f"no row-level security on: {unprotected}  "
-                 f"(run: py migrate_rls.py --apply)")
+                 f"(run: py migrations/migrate_rls.py --apply)")
         else:
             ok(f"all {len(tables)} tables have RLS enabled, FORCEd and a policy")
 
@@ -672,7 +685,7 @@ def _drop_temp_companies():
         print(f"\n   (removed the temporary companies: {_temp_companies})")
     except Exception as e:                                      # noqa: BLE001
         warn(f"could not remove the temporary companies {_temp_companies}: "
-             f"{e} — remove them with py _cleanup_probe.py")
+             f"{e} — remove them with py tests/_cleanup_probe.py")
 
 
 def _mint(user_id, role, email, company_id):

@@ -11,8 +11,8 @@ given its own employee, job, salary and leave type, and then EVERY
 ORDERED PAIR is probed in both directions: 4 companies = 12 attacker /
 target pairs, not just the two adjacent ones.
 
-    py _e2e_many.py             build them, probe, leave them in place
-    py _e2e_many.py --cleanup   remove them afterwards
+    py tests/_e2e_many.py             build them, probe, leave them in place
+    py tests/_e2e_many.py --cleanup   remove them afterwards
 
 Everything it creates is named "Probe ..." with @probetest.example
 accounts, so `_cleanup_probe.py` also removes them.
@@ -25,6 +25,19 @@ import warnings
 warnings.filterwarnings("ignore")
 
 from fastapi.testclient import TestClient                      # noqa: E402
+# ──── Backend/ ko raaste par lao ────
+# Yeh script Backend/ ke andar ek folder mein hai. `py tests/x.py`
+# chalane par Python sirf us folder ko sys.path par rakhta hai, cwd ko
+# nahi — to `import app` nakaam ho jata. Aur kuch checks source tree ko
+# `Path("app")` se scan karte hain, jo cwd par munhasir hai.
+import os as _os
+import sys as _sys
+
+_BACKEND = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _BACKEND not in _sys.path:
+    _sys.path.insert(0, _BACKEND)
+_os.chdir(_BACKEND)
+
 from app.main import app                                       # noqa: E402
 from app.models.company import Company                         # noqa: E402
 from app.models.payroll import Payslip, SalaryStructure        # noqa: E402
@@ -258,6 +271,6 @@ if CLEANUP:
     subprocess.run([sys.executable, "_cleanup_probe.py", "--apply"])
 else:
     print(f"\n  {HOW_MANY} probe companies left in place. Remove them with:")
-    print("     py _cleanup_probe.py --apply")
+    print("     py tests/_cleanup_probe.py --apply")
 
 sys.exit(1 if fails else 0)

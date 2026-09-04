@@ -1,8 +1,8 @@
 """
 CEO console — the questions a CEO actually asks
 ───────────────────────────────────────────────
-    py check_console.py            run every case
-    py check_console.py --show     print each full reply as well
+    py tests/check_console.py            run every case
+    py tests/check_console.py --show     print each full reply as well
 
 This makes real model calls, so it costs tokens and takes a few minutes.
 It exists because the console's failures were never crashes — every one
@@ -24,7 +24,21 @@ import re
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# (purana bootstrap hataya: move ke baad yeh apne hi folder ko
+#  daal raha tha, Backend/ ko nahi)
+
+# ──── Backend/ ko raaste par lao ────
+# Yeh script Backend/ ke andar ek folder mein hai. `py tests/x.py`
+# chalane par Python sirf us folder ko sys.path par rakhta hai, cwd ko
+# nahi — to `import app` nakaam ho jata. Aur kuch checks source tree ko
+# `Path("app")` se scan karte hain, jo cwd par munhasir hai.
+import os as _os
+import sys as _sys
+
+_BACKEND = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _BACKEND not in _sys.path:
+    _sys.path.insert(0, _BACKEND)
+_os.chdir(_BACKEND)
 
 from app.agents.chat_agent import _FILLER
 from app.agents.hr_console_agent import ask_console

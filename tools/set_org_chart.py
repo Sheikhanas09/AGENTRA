@@ -1,10 +1,10 @@
 """
 Move job titles out of the department column
 ────────────────────────────────────────────
-    py set_org_chart.py                                 show what is stored
-    py set_org_chart.py --map "Backend Developer=Engineering" \\
+    py tools/set_org_chart.py                                 show what is stored
+    py tools/set_org_chart.py --map "Backend Developer=Engineering" \\
                         --map "Frontend Developer=Engineering"
-    py set_org_chart.py --map ... --apply
+    py tools/set_org_chart.py --map ... --apply
 
 WHAT IS WRONG WITH THE DATA
 ───────────────────────────
@@ -44,7 +44,8 @@ Rows already carrying a designation are left exactly as they are.
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# (purana bootstrap hataya: move ke baad yeh apne hi folder ko
+#  daal raha tha, Backend/ ko nahi)
 
 # ──── This script works across companies, and says so ────
 # The tenant guard refuses any query on a session that has not declared
@@ -52,6 +53,19 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # database, so crossing companies IS the job — the point is that it is
 # declared rather than assumed, and appears in the list
 # `check_tenancy.py` prints.
+# ──── Backend/ ko raaste par lao ────
+# Yeh script Backend/ ke andar ek folder mein hai. `py tests/x.py`
+# chalane par Python sirf us folder ko sys.path par rakhta hai, cwd ko
+# nahi — to `import app` nakaam ho jata. Aur kuch checks source tree ko
+# `Path("app")` se scan karte hain, jo cwd par munhasir hai.
+import os as _os
+import sys as _sys
+
+_BACKEND = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _BACKEND not in _sys.path:
+    _sys.path.insert(0, _BACKEND)
+_os.chdir(_BACKEND)
+
 from app.utils.tenancy import unscoped_session
 
 
@@ -104,7 +118,7 @@ def main() -> int:
     if not MAPPING:
         print("\nNo --map given, so nothing would change. Each one moves a "
               "job title out of the department column, e.g.")
-        print('  py set_org_chart.py --map "Backend Developer=Engineering"')
+        print('  py tools/set_org_chart.py --map "Backend Developer=Engineering"')
         db.close()
         return 0
 

@@ -1,9 +1,9 @@
 """
 Check the model before trusting it
 ──────────────────────────────────
-    py check_llm.py                 use what .env says
-    py check_llm.py --list          show every provider and its package
-    py check_llm.py --model X       try one model without editing .env
+    py tests/check_llm.py                 use what .env says
+    py tests/check_llm.py --list          show every provider and its package
+    py tests/check_llm.py --model X       try one model without editing .env
 
 Run this after changing a key. It makes ONE tiny call, so a wrong key or
 a withdrawn model shows up here instead of as "I could not pull that up"
@@ -16,7 +16,21 @@ Exit code is 1 on failure, so CI can use it.
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# (purana bootstrap hataya: move ke baad yeh apne hi folder ko
+#  daal raha tha, Backend/ ko nahi)
+
+# ──── Backend/ ko raaste par lao ────
+# Yeh script Backend/ ke andar ek folder mein hai. `py tests/x.py`
+# chalane par Python sirf us folder ko sys.path par rakhta hai, cwd ko
+# nahi — to `import app` nakaam ho jata. Aur kuch checks source tree ko
+# `Path("app")` se scan karte hain, jo cwd par munhasir hai.
+import os as _os
+import sys as _sys
+
+_BACKEND = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _BACKEND not in _sys.path:
+    _sys.path.insert(0, _BACKEND)
+_os.chdir(_BACKEND)
 
 from app.utils.llm import (
     LLMNotConfigured, PROVIDERS, base_url, chat_model, describe, llm_key,

@@ -1,8 +1,8 @@
 """
 Cancel payslips for months before somebody joined
 ─────────────────────────────────────────────────
-    py fix_prejoining_payslips.py            show what would change
-    py fix_prejoining_payslips.py --apply    actually change it
+    py tools/fix_prejoining_payslips.py            show what would change
+    py tools/fix_prejoining_payslips.py --apply    actually change it
 
 Payroll used to run over "everyone employed today", with no reference to
 the month being paid. So an employee who joined on 17 June had payslips
@@ -35,7 +35,8 @@ this occurred.
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# (purana bootstrap hataya: move ke baad yeh apne hi folder ko
+#  daal raha tha, Backend/ ko nahi)
 
 # ──── This script works across companies, and says so ────
 # The tenant guard refuses any query on a session that has not declared
@@ -43,6 +44,19 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # database, so crossing companies IS the job — the point is that it is
 # declared rather than assumed, and appears in the list
 # `check_tenancy.py` prints.
+# ──── Backend/ ko raaste par lao ────
+# Yeh script Backend/ ke andar ek folder mein hai. `py tests/x.py`
+# chalane par Python sirf us folder ko sys.path par rakhta hai, cwd ko
+# nahi — to `import app` nakaam ho jata. Aur kuch checks source tree ko
+# `Path("app")` se scan karte hain, jo cwd par munhasir hai.
+import os as _os
+import sys as _sys
+
+_BACKEND = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _BACKEND not in _sys.path:
+    _sys.path.insert(0, _BACKEND)
+_os.chdir(_BACKEND)
+
 from app.utils.tenancy import unscoped_session
 
 

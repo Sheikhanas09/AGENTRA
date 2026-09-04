@@ -1,8 +1,8 @@
 """
 Chat transcripts ko encrypt karna — jo pehle se para hai
 ────────────────────────────────────────────────────────
-    py migrate_encrypt_chat.py            dekho kya karega
-    py migrate_encrypt_chat.py --apply    kar do
+    py migrations/migrate_encrypt_chat.py            dekho kya karega
+    py migrations/migrate_encrypt_chat.py --apply    kar do
 
 `chat_messages.text` aur `chat_sessions.title` ab `EncryptedText` hain,
 to AAJ SE likha hua har message encrypted jata hai. Yeh script us se
@@ -35,6 +35,19 @@ import json
 import sys
 
 from sqlalchemy import text
+
+# ──── Backend/ ko raaste par lao ────
+# Yeh script Backend/ ke andar ek folder mein hai. `py tests/x.py`
+# chalane par Python sirf us folder ko sys.path par rakhta hai, cwd ko
+# nahi — to `import app` nakaam ho jata. Aur kuch checks source tree ko
+# `Path("app")` se scan karte hain, jo cwd par munhasir hai.
+import os as _os
+import sys as _sys
+
+_BACKEND = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _BACKEND not in _sys.path:
+    _sys.path.insert(0, _BACKEND)
+_os.chdir(_BACKEND)
 
 from app.database import admin_engine
 from app.utils.crypto import CHAT_ENV_NAME, SecretsNotConfigured, cipher_for

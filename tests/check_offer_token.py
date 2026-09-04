@@ -1,7 +1,7 @@
 """
 Offer links — the authority that travels in an email
 ────────────────────────────────────────────────────
-    py check_offer_token.py
+    py tests/check_offer_token.py
 
 The candidate has no account, so the link IS the authorisation. That
 makes this the one URL in the system where guessing is the attack.
@@ -21,6 +21,19 @@ import secrets                                                  # noqa: E402
 from datetime import datetime, timedelta                        # noqa: E402
 
 from fastapi.testclient import TestClient                       # noqa: E402
+
+# ──── Backend/ ko raaste par lao ────
+# Yeh script Backend/ ke andar ek folder mein hai. `py tests/x.py`
+# chalane par Python sirf us folder ko sys.path par rakhta hai, cwd ko
+# nahi — to `import app` nakaam ho jata. Aur kuch checks source tree ko
+# `Path("app")` se scan karte hain, jo cwd par munhasir hai.
+import os as _os
+import sys as _sys
+
+_BACKEND = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _BACKEND not in _sys.path:
+    _sys.path.insert(0, _BACKEND)
+_os.chdir(_BACKEND)
 
 from app.main import app                                        # noqa: E402
 from app.models.company import Company, STATUS_ACTIVE           # noqa: E402

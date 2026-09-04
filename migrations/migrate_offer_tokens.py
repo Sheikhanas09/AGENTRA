@@ -1,8 +1,8 @@
 """
 Secure offer links
 ──────────────────
-    py migrate_offer_tokens.py            show what it would do
-    py migrate_offer_tokens.py --apply    do it
+    py migrations/migrate_offer_tokens.py            show what it would do
+    py migrations/migrate_offer_tokens.py --apply    do it
 
 Adds the token columns to `applications` and reports which offers are
 currently open on the OLD link shape, because those are the ones that
@@ -24,6 +24,19 @@ and the candidate gets a working link rather than a dead one.
 import sys
 
 from sqlalchemy import text
+
+# ──── Backend/ ko raaste par lao ────
+# Yeh script Backend/ ke andar ek folder mein hai. `py tests/x.py`
+# chalane par Python sirf us folder ko sys.path par rakhta hai, cwd ko
+# nahi — to `import app` nakaam ho jata. Aur kuch checks source tree ko
+# `Path("app")` se scan karte hain, jo cwd par munhasir hai.
+import os as _os
+import sys as _sys
+
+_BACKEND = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _BACKEND not in _sys.path:
+    _sys.path.insert(0, _BACKEND)
+_os.chdir(_BACKEND)
 
 from app.database import admin_engine
 from app.models.recruitment import Application  # noqa: F401  (metadata)
@@ -116,7 +129,7 @@ def main():
     if not APPLY:
         say("  dry run — nothing was written. Re-run with --apply")
     else:
-        say("  done. Run: py check_offer_token.py")
+        say("  done. Run: py tests/check_offer_token.py")
     say("=" * 66)
 
 

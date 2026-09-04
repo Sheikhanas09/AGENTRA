@@ -20,8 +20,8 @@ Postgres now applies that to every SELECT, UPDATE and DELETE against the
 table, from any code path at all. A query that forgets the company does
 not return the wrong rows — it returns none.
 
-Run:  py migrate_rls.py            (shows what it would do)
-      py migrate_rls.py --apply    (does it)
+Run:  py migrations/migrate_rls.py            (shows what it would do)
+      py migrations/migrate_rls.py --apply    (does it)
 
 ═══════════════════════════════════════════════════════════
 ⚠ THE APP MUST NOT CONNECT AS A SUPERUSER
@@ -70,6 +70,19 @@ import secrets
 import sys
 
 from sqlalchemy import text
+
+# ──── Backend/ ko raaste par lao ────
+# Yeh script Backend/ ke andar ek folder mein hai. `py tests/x.py`
+# chalane par Python sirf us folder ko sys.path par rakhta hai, cwd ko
+# nahi — to `import app` nakaam ho jata. Aur kuch checks source tree ko
+# `Path("app")` se scan karte hain, jo cwd par munhasir hai.
+import os as _os
+import sys as _sys
+
+_BACKEND = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _BACKEND not in _sys.path:
+    _sys.path.insert(0, _BACKEND)
+_os.chdir(_BACKEND)
 
 from app.database import admin_engine, DATABASE_URL
 from app.utils.tenant_guard import TENANT_COLUMN
@@ -312,7 +325,7 @@ def main():
         say("  NOTHING IS ENFORCED UNTIL DATABASE_URL POINTS AT "
             f"`{APP_ROLE}` —")
         say("  as `postgres` the policies exist and are ignored.")
-        say("  Then: py check_tenancy.py")
+        say("  Then: py tests/check_tenancy.py")
     else:
         say("  dry run — nothing was written. Re-run with --apply")
     say("=" * 66)

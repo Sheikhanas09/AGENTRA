@@ -1,7 +1,7 @@
 """
 The `companies` table's own boundary
 ────────────────────────────────────
-    py check_companies_rls.py
+    py tests/check_companies_rls.py
 
 `companies` was the last table without a row-level-security policy, and
 the reasons it was left out were real: the lookup that DECIDES a
@@ -20,6 +20,19 @@ warnings.filterwarnings("ignore")
 import secrets                                                  # noqa: E402
 
 from sqlalchemy import func, text                               # noqa: E402
+
+# ──── Backend/ ko raaste par lao ────
+# Yeh script Backend/ ke andar ek folder mein hai. `py tests/x.py`
+# chalane par Python sirf us folder ko sys.path par rakhta hai, cwd ko
+# nahi — to `import app` nakaam ho jata. Aur kuch checks source tree ko
+# `Path("app")` se scan karte hain, jo cwd par munhasir hai.
+import os as _os
+import sys as _sys
+
+_BACKEND = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _BACKEND not in _sys.path:
+    _sys.path.insert(0, _BACKEND)
+_os.chdir(_BACKEND)
 
 from app.database import engine                                 # noqa: E402
 from app.models.company import (                                # noqa: E402

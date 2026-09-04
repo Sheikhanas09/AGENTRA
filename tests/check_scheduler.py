@@ -1,7 +1,7 @@
 """
 Background jobs, with two companies on the books
 ────────────────────────────────────────────────
-    py check_scheduler.py
+    py tests/check_scheduler.py
 
 A scheduler job has no request behind it, so nothing hands it a tenant.
 It has to establish one for itself, per company, every time round the
@@ -27,6 +27,19 @@ warnings.filterwarnings("ignore")
 # would email real people.
 _notify_was = os.environ.get("NOTIFICATIONS_ENABLED")
 os.environ["NOTIFICATIONS_ENABLED"] = "false"
+
+# ──── Backend/ ko raaste par lao ────
+# Yeh script Backend/ ke andar ek folder mein hai. `py tests/x.py`
+# chalane par Python sirf us folder ko sys.path par rakhta hai, cwd ko
+# nahi — to `import app` nakaam ho jata. Aur kuch checks source tree ko
+# `Path("app")` se scan karte hain, jo cwd par munhasir hai.
+import os as _os
+import sys as _sys
+
+_BACKEND = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _BACKEND not in _sys.path:
+    _sys.path.insert(0, _BACKEND)
+_os.chdir(_BACKEND)
 
 import app.main                                                 # noqa: E402,F401
 from app.models.company import (                                # noqa: E402
